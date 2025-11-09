@@ -140,8 +140,8 @@ class CloseRequest(commands.Cog):
 
     @checks.has_permissions(PermissionLevel.SUPPORTER)
     @checks.thread_only()
-    @commands.command()
-    async def closerequest(self, ctx, *, args: str = ""):
+    @commands.command(name="closerequest")
+    async def closerequest(self, ctx, *, args: str = None):
         """Send a close request to the user with interactive buttons."""
         
         thread = ctx.thread
@@ -207,6 +207,9 @@ class CloseRequest(commands.Cog):
         dummy_message.author = self.bot.modmail_guild.me
         dummy_message.content = None
         dummy_message.embeds = [embed]
+        dummy_message.attachments = []
+        dummy_message.components = []
+        dummy_message.stickers = []
         
         msgs, _ = await thread.reply(dummy_message, anonymous=False)
         
@@ -221,7 +224,7 @@ class CloseRequest(commands.Cog):
             await recipient_msg.edit(view=view)
         
         # Confirm to staff
-        await ctx.send(f"Close request sent to {thread.recipient.mention}.")
+        await ctx.send(f"✅ Close request sent to {thread.recipient.mention}.")
         
         # Handle auto-close if time is specified
         if auto_close_time:
@@ -262,7 +265,7 @@ class CloseRequest(commands.Cog):
         """Set the default close request message."""
         self.config["default_message"] = message
         await self.update_config()
-        await ctx.send("Default close request message updated.")
+        await ctx.send("✅ Default close request message updated.")
 
     @checks.has_permissions(PermissionLevel.ADMINISTRATOR)
     @closerequestconfig.command(name="setautoclosemessage")
@@ -270,7 +273,7 @@ class CloseRequest(commands.Cog):
         """Set the auto-close message."""
         self.config["auto_close_message"] = message
         await self.update_config()
-        await ctx.send("Auto-close message updated.")
+        await ctx.send("✅ Auto-close message updated.")
 
     @checks.has_permissions(PermissionLevel.ADMINISTRATOR)
     @closerequestconfig.command(name="view")
