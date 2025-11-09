@@ -144,6 +144,8 @@ class CloseRequest(commands.Cog):
     async def closerequest(self, ctx, *, args: str = ""):
         """Send a close request to the user with interactive buttons."""
         
+        thread = ctx.thread
+        
         # Parse arguments
         auto_close_time = None
         custom_message = None
@@ -178,8 +180,6 @@ class CloseRequest(commands.Cog):
             else:
                 # No digits in first word, everything is custom message
                 custom_message = args
-        
-        thread = ctx.thread
         
         # Determine the message to use
         if custom_message:
