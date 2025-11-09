@@ -2,9 +2,10 @@ import asyncio
 import re
 import discord
 from discord.ext import commands
+from copy import copy
 
 from core import checks
-from core.models import PermissionLevel
+from core.models import PermissionLevel, DummyMessage
 
 def parse_time(time_str):
     """Parse time string to seconds."""
@@ -54,13 +55,13 @@ def format_time(seconds):
         return f"{days} day{'s' if days != 1 else ''} {remaining_hours} hour{'s' if remaining_hours != 1 else ''}"
 
 class CloseRequestView(discord.ui.View):
-    def __init__(self, bot, thread, closer, close_message, recipient_message):
+    def __init__(self, bot, thread, closer, close_message, all_messages):
         super().__init__(timeout=None)
         self.bot = bot
         self.thread = thread
         self.closer = closer
         self.close_message = close_message
-        self.recipient_message = recipient_message
+        self.all_messages = all_messages  # All messages sent (thread channel + DM)
         self.result = None
 
     @discord.ui.button(label="Close Ticket", style=discord.ButtonStyle.success, emoji="✅")
@@ -72,19 +73,26 @@ class CloseRequestView(discord.ui.View):
         self.result = "closed"
         self.stop()
         
-        # Update the embed to show it was closed
+        # Update all messages (both thread and DM)
         embed = discord.Embed(
             title="Ticket Closed",
-            description="This ticket has been closed.",
+            description="This ticket has been closed by the user.",
             color=discord.Color.green()
         )
-        try:
-            await self.recipient_message.edit(embed=embed, view=None)
-        except:
-            pass
         
-        # Close the thread
-        await self.thread.close(closer=self.closer, silent=False, delete_channel=False, message=self.close_message)
+        for msg in self.all_messages:
+            try:
+                await msg.edit(embed=embed, view=None)
+            except:
+                pass
+        
+        # Actually close the thread
+        await self.thread.close(
+            closer=self.closer,
+            silent=False,
+            delete_channel=False,
+            message=self.close_message if self.close_message else "Ticket closed by user request."
+        )
 
     @discord.ui.button(label="Keep Open", style=discord.ButtonStyle.danger, emoji="❌")
     async def cancel_close(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -95,16 +103,18 @@ class CloseRequestView(discord.ui.View):
         self.result = "cancelled"
         self.stop()
         
-        # Update the embed to show it was cancelled
+        # Update all messages (both thread and DM)
         embed = discord.Embed(
             title="Close Request Cancelled",
             description="This ticket will remain open.",
             color=discord.Color.red()
         )
-        try:
-            await self.recipient_message.edit(embed=embed, view=None)
-        except:
-            pass
+        
+        for msg in self.all_messages:
+            try:
+                await msg.edit(embed=embed, view=None)
+            except:
+                pass
 
 class CloseRequest(commands.Cog):
     def __init__(self, bot):
@@ -172,44 +182,47 @@ class CloseRequest(commands.Cog):
         embed = discord.Embed(
             title="Close Request",
             description=message_text,
-            color=discord.Color.blurple()
+            color=self.bot.main_color
         )
         if auto_close_time:
             embed.set_footer(text=f"This ticket will auto-close in {format_time(auto_close_time)} if no response is given.")
 
-        # Send to thread channel first (so staff can see it)
+        # Create dummy message to send through thread.reply (like AdvancedMenu does)
         try:
-            # Get the recipient message that will be sent
-            from core.models import DummyMessage
-            from copy import copy
+            dummy_message = DummyMessage(copy(thread._genesis_message))
+            dummy_message.author = self.bot.modmail_guild.me
+            dummy_message.content = message_text
             
-            dummy = DummyMessage(copy(thread._genesis_message))
-            dummy.author = ctx.author
-            dummy.content = embed.description
+            # Clear residual attributes
+            dummy_message.attachments = []
+            dummy_message.components = []
+            dummy_message.embeds = []
+            dummy_message.stickers = []
             
-            # Send through thread.reply to get both messages (staff and user)
-            messages, _ = await thread.reply(dummy, anonymous=False)
+            # Send through thread.reply to get both messages (anonymous=False so it shows bot name)
+            messages, _ = await thread.reply(dummy_message, anonymous=False)
             
-            # Find the recipient's message
-            recipient_msg = None
-            for msg in messages:
-                if msg.channel.recipient == thread.recipient:
-                    recipient_msg = msg
-                    break
-            
-            if recipient_msg is None:
+            if not messages:
                 await ctx.send("❌ Could not send message to the user.")
                 return
             
-            # Create the view and edit the recipient message with the embed and buttons
-            view = CloseRequestView(self.bot, thread, ctx.author, close_message, recipient_msg)
-            await recipient_msg.edit(embed=embed, view=view)
+            # Create view with all messages
+            view = CloseRequestView(self.bot, thread, ctx.author, close_message, messages)
             
+            # Edit all messages to add embed and buttons
+            for msg in messages:
+                try:
+                    await msg.edit(embed=embed, view=view)
+                except Exception as e:
+                    print(f"Error editing message: {e}")
+                    
         except discord.Forbidden:
             await ctx.send("❌ Could not send message to the user. They might have DMs disabled.")
             return
         except Exception as e:
             await ctx.send(f"❌ An error occurred: {e}")
+            import traceback
+            print(traceback.format_exc())
             return
         
         await ctx.send(f"✅ Close request sent to {thread.recipient.mention}.")
@@ -226,20 +239,29 @@ class CloseRequest(commands.Cog):
                 
                 # If view.result is None, it means timeout occurred (no button was clicked)
                 if view.result is None:
-                    # Close the thread
-                    await thread.close(closer=ctx.author, silent=False, delete_channel=False, message=self.config["auto_close_message"])
-                    
-                    # Update the embed
+                    # Update all messages
                     embed.title = "Ticket Auto-Closed"
                     embed.description = self.config["auto_close_message"]
                     embed.color = discord.Color.orange()
                     embed.set_footer(text="This ticket was automatically closed due to no response.")
-                    try:
-                        await recipient_msg.edit(embed=embed, view=None)
-                    except:
-                        pass
+                    
+                    for msg in messages:
+                        try:
+                            await msg.edit(embed=embed, view=None)
+                        except:
+                            pass
+                    
+                    # Close the thread
+                    await thread.close(
+                        closer=ctx.author,
+                        silent=False,
+                        delete_channel=False,
+                        message=self.config["auto_close_message"]
+                    )
             except Exception as e:
                 print(f"Error in auto-close: {e}")
+                import traceback
+                print(traceback.format_exc())
 
     @checks.has_permissions(PermissionLevel.ADMINISTRATOR)
     @commands.group(invoke_without_command=True)
@@ -267,7 +289,7 @@ class CloseRequest(commands.Cog):
     @closerequestconfig.command(name="view")
     async def closerequestconfig_view(self, ctx):
         """View current configuration."""
-        embed = discord.Embed(title="Close Request Configuration", color=discord.Color.blurple())
+        embed = discord.Embed(title="Close Request Configuration", color=self.bot.main_color)
         embed.add_field(name="Default Message", value=self.config["default_message"], inline=False)
         embed.add_field(name="Auto-Close Message", value=self.config["auto_close_message"], inline=False)
         await ctx.send(embed=embed)
