@@ -1,10 +1,70 @@
 from copy import copy
 import asyncio
+import re
 import discord
 from discord.ext import commands
 
 from core import checks
 from core.models import DummyMessage, PermissionLevel
+
+def parse_time(time_str):
+    """
+    Parse time string to seconds.
+    Supports: 1h, 1hr, 1hour, 1hours, 1d, 1day, 1m, 1min, 1minute, 1s, 1sec, 1second
+    Also supports combinations like: 1h 30m, 2d 3h 15m
+    """
+    if not time_str:
+        return None
+    
+    # Convert to lowercase and remove extra spaces
+    time_str = time_str.lower().strip()
+    
+    # Time units in seconds
+    units = {
+        's': 1, 'sec': 1, 'second': 1, 'seconds': 1,
+        'm': 60, 'min': 60, 'minute': 60, 'minutes': 60,
+        'h': 3600, 'hr': 3600, 'hour': 3600, 'hours': 3600,
+        'd': 86400, 'day': 86400, 'days': 86400
+    }
+    
+    # Find all number + unit combinations
+    pattern = r'(\d+)\s*([a-z]+)'
+    matches = re.findall(pattern, time_str)
+    
+    if not matches:
+        return None
+    
+    total_seconds = 0
+    for amount, unit in matches:
+        if unit in units:
+            total_seconds += int(amount) * units[unit]
+        else:
+            return None  # Invalid unit
+    
+    return total_seconds if total_seconds > 0 else None
+
+def format_time(seconds):
+    """Format seconds into a human-readable string."""
+    if seconds < 60:
+        return f"{seconds} second{'s' if seconds != 1 else ''}"
+    elif seconds < 3600:
+        minutes = seconds // 60
+        remaining_seconds = seconds % 60
+        if remaining_seconds == 0:
+            return f"{minutes} minute{'s' if minutes != 1 else ''}"
+        return f"{minutes} minute{'s' if minutes != 1 else ''} {remaining_seconds} second{'s' if remaining_seconds != 1 else ''}"
+    elif seconds < 86400:
+        hours = seconds // 3600
+        remaining_minutes = (seconds % 3600) // 60
+        if remaining_minutes == 0:
+            return f"{hours} hour{'s' if hours != 1 else ''}"
+        return f"{hours} hour{'s' if hours != 1 else ''} {remaining_minutes} minute{'s' if remaining_minutes != 1 else ''}"
+    else:
+        days = seconds // 86400
+        remaining_hours = (seconds % 86400) // 3600
+        if remaining_hours == 0:
+            return f"{days} day{'s' if days != 1 else ''}"
+        return f"{days} day{'s' if days != 1 else ''} {remaining_hours} hour{'s' if remaining_hours != 1 else ''}"
 
 class CloseRequestView(discord.ui.View):
     def __init__(self, bot, thread, closer, message):
@@ -81,18 +141,44 @@ class CloseRequest(commands.Cog):
     @checks.has_permissions(PermissionLevel.SUPPORTER)
     @checks.thread_only()
     @commands.command()
-    async def closerequest(self, ctx, auto_close_time: int = None, *, custom_message: str = None):
-        """
-        Send a close request to the user with interactive buttons.
+    async def closerequest(self, ctx, *, args: str = ""):
+        """Send a close request to the user with interactive buttons."""
         
-        Usage:
-        - closerequest
-        - closerequest 60
-        - closerequest Custom message here
-        - closerequest 60 Custom message here
+        # Parse arguments
+        auto_close_time = None
+        custom_message = None
         
-        If auto_close_time is provided (in seconds), the ticket will auto-close after that time if no response.
-        """
+        if args:
+            # Try to parse the first part as a time
+            parts = args.split(None, 1)
+            first_word = parts[0]
+            
+            # Check if it looks like a time string (contains digits)
+            if re.search(r'\d', first_word):
+                # Try to get more words that might be part of the time (e.g., "1 hour 30 minutes")
+                potential_time = first_word
+                remaining_parts = parts[1].split() if len(parts) > 1 else []
+                
+                # Keep adding words while they look like time components
+                temp_remaining = []
+                for word in remaining_parts:
+                    if re.search(r'\d', word) or word.lower() in ['s', 'sec', 'second', 'seconds', 'm', 'min', 'minute', 'minutes', 'h', 'hr', 'hour', 'hours', 'd', 'day', 'days']:
+                        potential_time += ' ' + word
+                    else:
+                        temp_remaining.append(word)
+                
+                parsed_time = parse_time(potential_time)
+                
+                if parsed_time:
+                    auto_close_time = parsed_time
+                    custom_message = ' '.join(temp_remaining) if temp_remaining else None
+                else:
+                    # Not a valid time, treat everything as message
+                    custom_message = args
+            else:
+                # No digits in first word, everything is custom message
+                custom_message = args
+        
         thread = ctx.thread
         
         # Determine the message to use
@@ -109,7 +195,9 @@ class CloseRequest(commands.Cog):
         )
         
         if auto_close_time:
-            embed.set_footer(text=f"This ticket will auto-close in {auto_close_time} seconds if no response is given.")
+            # Format time nicely for display
+            time_display = format_time(auto_close_time)
+            embed.set_footer(text=f"This ticket will auto-close in {time_display} if no response is given.")
         
         # Create the view with buttons
         view = CloseRequestView(self.bot, thread, ctx.author, self.config["auto_close_message"] if auto_close_time else None)
