@@ -1,11 +1,37 @@
-import asyncio
+# Close the thread using the close command
+                    dummy = DummyMessage(copy(messages[0]))
+                    dummy.author = thread.recipient
+                    dummy.content = f"{self.bot.prefix}close {self.config['auto_close_message']}"
+                    await invoke_command(f"close {self.config['auto_close_message']}", self.bot, thread, dummy)import asyncio
 import re
 import discord
 from discord.ext import commands
+from discord.ext.commands.view import StringView
 from copy import copy
 
 from core import checks
 from core.models import PermissionLevel, DummyMessage
+from core.utils import normalize_alias
+
+async def invoke_command(command_text, bot, thread, message):
+    """Invoke a command like .close"""
+    ctxs = []
+    aliases = normalize_alias(command_text)
+    for alias in aliases:
+        view = StringView(bot.prefix + alias)
+        ctx_ = commands.Context(prefix=bot.prefix, view=view, bot=bot, message=message)
+        ctx_.thread = thread
+        discord.utils.find(view.skip_string, await bot.get_prefix())
+        ctx_.invoked_with = view.get_word().lower()
+        ctx_.command = bot.all_commands.get(ctx_.invoked_with)
+        ctxs.append(ctx_)
+
+    for ctx in ctxs:
+        if ctx.command:
+            old_checks = copy(ctx.command.checks)
+            ctx.command.checks = [checks.has_permissions(PermissionLevel.INVALID)]
+            await bot.invoke(ctx)
+            ctx.command.checks = old_checks
 
 def parse_time(time_str):
     """Parse time string to seconds."""
@@ -86,13 +112,12 @@ class CloseRequestView(discord.ui.View):
             except:
                 pass
         
-        # Actually close the thread
-        await self.thread.close(
-            closer=self.closer,
-            silent=False,
-            delete_channel=False,
-            message=self.close_message if self.close_message else "Ticket closed by user request."
-        )
+        # Run the close command
+        close_msg = self.close_message if self.close_message else "Ticket closed by user request."
+        dummy = DummyMessage(copy(self.all_messages[0]))
+        dummy.author = self.thread.recipient
+        dummy.content = f"{self.bot.prefix}close {close_msg}"
+        await invoke_command(f"close {close_msg}", self.bot, self.thread, dummy)
 
     @discord.ui.button(label="Keep Open", style=discord.ButtonStyle.danger, emoji="❌")
     async def cancel_close(self, interaction: discord.Interaction, button: discord.ui.Button):
