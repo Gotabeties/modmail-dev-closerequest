@@ -1,8 +1,4 @@
-# Close the thread using the close command
-                    dummy = DummyMessage(copy(messages[0]))
-                    dummy.author = thread.recipient
-                    dummy.content = f"{self.bot.prefix}close {self.config['auto_close_message']}"
-                    await invoke_command(f"close {self.config['auto_close_message']}", self.bot, thread, dummy)import asyncio
+import asyncio
 import re
 import discord
 from discord.ext import commands
@@ -271,13 +267,11 @@ class CloseRequest(commands.Cog):
                         except:
                             pass
                     
-                    # Close the thread
-                    await thread.close(
-                        closer=ctx.author,
-                        silent=False,
-                        delete_channel=False,
-                        message=self.config["auto_close_message"]
-                    )
+                    # Close the thread using the close command
+                    dummy = DummyMessage(copy(messages[0]))
+                    dummy.author = thread.recipient
+                    dummy.content = f"{self.bot.prefix}close {self.config['auto_close_message']}"
+                    await invoke_command(f"close {self.config['auto_close_message']}", self.bot, thread, dummy)
             except Exception as e:
                 print(f"Error in auto-close: {e}")
                 import traceback
