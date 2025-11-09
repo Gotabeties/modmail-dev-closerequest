@@ -189,7 +189,8 @@ class CloseRequest(commands.Cog):
 
         # Create dummy message to send through thread.reply (like AdvancedMenu does)
         try:
-            dummy_message = DummyMessage(copy(thread._genesis_message))
+            # Use ctx.message as base instead of genesis_message
+            dummy_message = DummyMessage(copy(ctx.message))
             dummy_message.author = self.bot.modmail_guild.me
             dummy_message.content = message_text
             
