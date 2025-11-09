@@ -187,35 +187,29 @@ class CloseRequest(commands.Cog):
         if auto_close_time:
             embed.set_footer(text=f"This ticket will auto-close in {format_time(auto_close_time)} if no response is given.")
 
-        # Create dummy message to send through thread.reply (like AdvancedMenu does)
+        # Send the close request message
         try:
-            # Use ctx.message as base instead of genesis_message
-            dummy_message = DummyMessage(copy(ctx.message))
-            dummy_message.author = self.bot.modmail_guild.me
-            dummy_message.content = message_text
+            # Send to thread channel (staff can see it)
+            thread_msg = await thread.channel.send(embed=embed)
             
-            # Clear residual attributes
-            dummy_message.attachments = []
-            dummy_message.components = []
-            dummy_message.embeds = []
-            dummy_message.stickers = []
-            
-            # Send through thread.reply to get both messages (anonymous=False so it shows bot name)
-            messages, _ = await thread.reply(dummy_message, anonymous=False)
-            
-            if not messages:
-                await ctx.send("❌ Could not send message to the user.")
-                return
+            # Send to user's DM
+            try:
+                user_msg = await thread.recipient.send(embed=embed)
+                messages = [thread_msg, user_msg]
+            except discord.Forbidden:
+                # User has DMs disabled, only thread message exists
+                messages = [thread_msg]
+                await ctx.send("⚠️ Close request sent to thread, but user has DMs disabled.")
             
             # Create view with all messages
             view = CloseRequestView(self.bot, thread, ctx.author, close_message, messages)
             
-            # Edit all messages to add embed and buttons
+            # Edit all messages to add buttons
             for msg in messages:
                 try:
-                    await msg.edit(embed=embed, view=view)
+                    await msg.edit(view=view)
                 except Exception as e:
-                    print(f"Error editing message: {e}")
+                    print(f"Error adding buttons to message: {e}")
                     
         except discord.Forbidden:
             await ctx.send("❌ Could not send message to the user. They might have DMs disabled.")
