@@ -142,8 +142,9 @@ class CloseRequest(commands.Cog):
         self.bot = bot
         self.db = bot.plugin_db.get_partition(self)
         self.default_config = {
-            "default_message": "Your support ticket appears to be resolved. Please click the checkmark below to close this ticket, or click the X if you need more support.",
-            "auto_close_message": "This ticket has been automatically closed due to inactivity."
+            "default_message": "Your support ticket appears to be resolved. This ticket will auto-close in $time if no response is given.",
+            "auto_close_message": "This ticket has been automatically closed due to inactivity.",
+            "default_time": 21600  # 6 hours in seconds
         }
         self.config = None
 
@@ -169,16 +170,17 @@ class CloseRequest(commands.Cog):
     @checks.thread_only()
     @commands.command(name="closerequest")
     async def closerequest(self, ctx, *, args: str = None):
-        """Send a close request to the user with interactive buttons."""
+        """Send a close request to the user with interactive buttons. Optionally specify a time (e.g., 30m, 2h, 1d)."""
         thread = ctx.thread
-        auto_close_time = None
-        custom_message = None
+        auto_close_time = self.config["default_time"]  # Default to config time
         
-        # Parse arguments for time and custom message
+        # Parse arguments for optional time override
         if args:
+            # Check if the argument starts with a time pattern
             parts = args.split(None, 1)
             first_word = parts[0]
             if re.search(r'\d', first_word):
+                # Potential time found, try to parse it
                 potential_time = first_word
                 remaining_parts = parts[1].split() if len(parts) > 1 else []
                 temp_remaining = []
@@ -190,14 +192,12 @@ class CloseRequest(commands.Cog):
                 parsed_time = parse_time(potential_time)
                 if parsed_time:
                     auto_close_time = parsed_time
-                    custom_message = ' '.join(temp_remaining) if temp_remaining else None
-                else:
-                    custom_message = args
-            else:
-                custom_message = args
 
-        message_text = custom_message if custom_message else self.config["default_message"]
-        close_message = self.config["auto_close_message"] if auto_close_time else None
+        # Get message template and replace $time with formatted time
+        message_template = self.config["default_message"]
+        formatted_time = format_time(auto_close_time)
+        message_text = message_template.replace("$time", formatted_time)
+        close_message = self.config["auto_close_message"]
 
         # Create the embed
         embed = discord.Embed(
@@ -205,8 +205,6 @@ class CloseRequest(commands.Cog):
             description=message_text,
             color=self.bot.main_color
         )
-        if auto_close_time:
-            embed.set_footer(text=f"This ticket will auto-close in {format_time(auto_close_time)} if no response is given.")
 
         # Send the close request message
         try:
@@ -241,41 +239,39 @@ class CloseRequest(commands.Cog):
             print(traceback.format_exc())
             return
         
-        await ctx.send(f"✅ Close request sent to {thread.recipient.mention}.")
+        await ctx.send(f"✅ Close request sent to {thread.recipient.mention}. Auto-close in {formatted_time}.")
 
-        # Handle auto-close if time was specified
-        if auto_close_time:
-            try:
-                done, pending = await asyncio.wait(
-                    [asyncio.create_task(view.wait()), asyncio.create_task(asyncio.sleep(auto_close_time))],
-                    return_when=asyncio.FIRST_COMPLETED
-                )
-                for task in pending:
-                    task.cancel()
+        # Handle auto-close
+        try:
+            done, pending = await asyncio.wait(
+                [asyncio.create_task(view.wait()), asyncio.create_task(asyncio.sleep(auto_close_time))],
+                return_when=asyncio.FIRST_COMPLETED
+            )
+            for task in pending:
+                task.cancel()
+            
+            # If view.result is None, it means timeout occurred (no button was clicked)
+            if view.result is None:
+                # Update all messages
+                embed.title = "Ticket Auto-Closed"
+                embed.description = self.config["auto_close_message"]
+                embed.color = discord.Color.orange()
                 
-                # If view.result is None, it means timeout occurred (no button was clicked)
-                if view.result is None:
-                    # Update all messages
-                    embed.title = "Ticket Auto-Closed"
-                    embed.description = self.config["auto_close_message"]
-                    embed.color = discord.Color.orange()
-                    embed.set_footer(text="This ticket was automatically closed due to no response.")
-                    
-                    for msg in messages:
-                        try:
-                            await msg.edit(embed=embed, view=None)
-                        except:
-                            pass
-                    
-                    # Close the thread using the close command
-                    dummy = DummyMessage(copy(messages[0]))
-                    dummy.author = thread.recipient
-                    dummy.content = f"{self.bot.prefix}close {self.config['auto_close_message']}"
-                    await invoke_command(f"close {self.config['auto_close_message']}", self.bot, thread, dummy)
-            except Exception as e:
-                print(f"Error in auto-close: {e}")
-                import traceback
-                print(traceback.format_exc())
+                for msg in messages:
+                    try:
+                        await msg.edit(embed=embed, view=None)
+                    except:
+                        pass
+                
+                # Close the thread using the close command
+                dummy = DummyMessage(copy(messages[0]))
+                dummy.author = thread.recipient
+                dummy.content = f"{self.bot.prefix}close {self.config['auto_close_message']}"
+                await invoke_command(f"close {self.config['auto_close_message']}", self.bot, thread, dummy)
+        except Exception as e:
+            print(f"Error in auto-close: {e}")
+            import traceback
+            print(traceback.format_exc())
 
     @checks.has_permissions(PermissionLevel.ADMINISTRATOR)
     @commands.group(invoke_without_command=True)
@@ -286,10 +282,10 @@ class CloseRequest(commands.Cog):
     @checks.has_permissions(PermissionLevel.ADMINISTRATOR)
     @closerequestconfig.command(name="setmessage")
     async def closerequestconfig_setmessage(self, ctx, *, message: str):
-        """Set the default close request message."""
+        """Set the default close request message. Use $time as a placeholder for the auto-close time."""
         self.config["default_message"] = message
         await self.update_config()
-        await ctx.send("✅ Default close request message updated.")
+        await ctx.send("✅ Default close request message updated. Use `$time` in your message to show the auto-close time.")
 
     @checks.has_permissions(PermissionLevel.ADMINISTRATOR)
     @closerequestconfig.command(name="setautoclosemessage")
@@ -300,12 +296,26 @@ class CloseRequest(commands.Cog):
         await ctx.send("✅ Auto-close message updated.")
 
     @checks.has_permissions(PermissionLevel.ADMINISTRATOR)
+    @closerequestconfig.command(name="settime")
+    async def closerequestconfig_settime(self, ctx, *, time: str):
+        """Set the default auto-close time (e.g., 30m, 6h, 1d)."""
+        parsed_time = parse_time(time)
+        if parsed_time is None:
+            await ctx.send("❌ Invalid time format. Use formats like: 30m, 6h, 1d")
+            return
+        
+        self.config["default_time"] = parsed_time
+        await self.update_config()
+        await ctx.send(f"✅ Default auto-close time set to {format_time(parsed_time)}.")
+
+    @checks.has_permissions(PermissionLevel.ADMINISTRATOR)
     @closerequestconfig.command(name="view")
     async def closerequestconfig_view(self, ctx):
         """View current configuration."""
         embed = discord.Embed(title="Close Request Configuration", color=self.bot.main_color)
         embed.add_field(name="Default Message", value=self.config["default_message"], inline=False)
         embed.add_field(name="Auto-Close Message", value=self.config["auto_close_message"], inline=False)
+        embed.add_field(name="Default Time", value=format_time(self.config["default_time"]), inline=False)
         await ctx.send(embed=embed)
 
 async def setup(bot):
