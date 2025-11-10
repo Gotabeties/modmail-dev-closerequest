@@ -142,7 +142,7 @@ class CloseRequest(commands.Cog):
         self.bot = bot
         self.db = bot.plugin_db.get_partition(self)
         self.default_config = {
-            "default_message": "Your support ticket appears to be resolved. This ticket will auto-close in $time if no response is given.",
+            "default_message": "Your support ticket appears to be resolved [Reason: $reason]. This ticket will auto-close in $time if no response is given.",
             "auto_close_message": "This ticket has been automatically closed due to inactivity.",
             "default_time": 21600  # 6 hours in seconds
         }
@@ -170,33 +170,62 @@ class CloseRequest(commands.Cog):
     @checks.thread_only()
     @commands.command(name="closerequest")
     async def closerequest(self, ctx, *, args: str = None):
-        """Send a close request to the user with interactive buttons. Optionally specify a time (e.g., 30m, 2h, 1d)."""
+        """Send a close request to the user with interactive buttons. 
+        Usage: !closerequest [reason] [time]
+        Examples: 
+        - !closerequest
+        - !closerequest Issue appears resolved
+        - !closerequest Issue appears resolved 30m
+        - !closerequest 2h
+        """
         thread = ctx.thread
         auto_close_time = self.config["default_time"]  # Default to config time
+        reason = None
         
-        # Parse arguments for optional time override
+        # Parse arguments for optional reason and time
         if args:
-            # Check if the argument starts with a time pattern
-            parts = args.split(None, 1)
-            first_word = parts[0]
-            if re.search(r'\d', first_word):
-                # Potential time found, try to parse it
-                potential_time = first_word
-                remaining_parts = parts[1].split() if len(parts) > 1 else []
-                temp_remaining = []
-                for word in remaining_parts:
-                    if re.search(r'\d', word) or word.lower() in ['s', 'sec', 'second', 'seconds', 'm', 'min', 'minute', 'minutes', 'h', 'hr', 'hour', 'hours', 'd', 'day', 'days']:
-                        potential_time += ' ' + word
-                    else:
-                        temp_remaining.append(word)
-                parsed_time = parse_time(potential_time)
-                if parsed_time:
-                    auto_close_time = parsed_time
+            words = args.split()
+            time_found = False
+            reason_words = []
+            
+            # Check each word from the end to find time
+            for i in range(len(words) - 1, -1, -1):
+                word = words[i]
+                # If this word looks like it could be time
+                if re.search(r'\d', word) or word.lower() in ['s', 'sec', 'second', 'seconds', 'm', 'min', 'minute', 'minutes', 'h', 'hr', 'hour', 'hours', 'd', 'day', 'days']:
+                    if not time_found:
+                        # Try to parse from this position to the end as time
+                        potential_time = ' '.join(words[i:])
+                        parsed_time = parse_time(potential_time)
+                        if parsed_time:
+                            auto_close_time = parsed_time
+                            time_found = True
+                            # Everything before this is the reason
+                            reason_words = words[:i]
+                            break
+            
+            # If no time was found, all words are the reason
+            if not time_found:
+                reason_words = words
+            
+            # Set reason if we have words
+            if reason_words:
+                reason = ' '.join(reason_words)
 
-        # Get message template and replace $time with formatted time
+        # Get message template and replace placeholders
         message_template = self.config["default_message"]
         formatted_time = format_time(auto_close_time)
         message_text = message_template.replace("$time", formatted_time)
+        
+        # Handle $reason placeholder
+        if "$reason" in message_text:
+            if reason:
+                # Replace $reason with the actual reason text
+                message_text = message_text.replace("$reason", reason)
+            else:
+                # Remove the bracketed section containing $reason
+                message_text = re.sub(r'\s*\[.*?\$reason.*?\]', '', message_text)
+                message_text = re.sub(r'\[.*?\$reason.*?\]\s*', '', message_text)
         close_message = self.config["auto_close_message"]
 
         # Create the embed
@@ -239,7 +268,7 @@ class CloseRequest(commands.Cog):
             print(traceback.format_exc())
             return
         
-        await ctx.send(f"✅ Close request sent to {thread.recipient.mention}. Auto-close in {formatted_time}.")
+        await ctx.send(f"✅ Close request sent. Automatically closing the ticket in {formatted_time}.")
 
         # Handle auto-close
         try:
@@ -282,10 +311,10 @@ class CloseRequest(commands.Cog):
     @checks.has_permissions(PermissionLevel.ADMINISTRATOR)
     @closerequestconfig.command(name="setmessage")
     async def closerequestconfig_setmessage(self, ctx, *, message: str):
-        """Set the default close request message. Use $time as a placeholder for the auto-close time."""
+        """Set the default close request message. Use $time for auto-close time and $reason for optional reason. Wrap $reason in brackets like [Reason: $reason] to only show when provided."""
         self.config["default_message"] = message
         await self.update_config()
-        await ctx.send("✅ Default close request message updated. Use `$time` in your message to show the auto-close time.")
+        await ctx.send("✅ Default close request message updated. Use `$time` for time and `$reason` for optional reason (wrap in brackets to hide when not provided).")
 
     @checks.has_permissions(PermissionLevel.ADMINISTRATOR)
     @closerequestconfig.command(name="setautoclosemessage")
