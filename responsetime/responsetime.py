@@ -35,12 +35,47 @@ class ResponseTime(commands.Cog):
             for k in missing:
                 self.config[k] = self.default_config[k]
             await self.update_config()
+        
+        # Load response times from database
+        stats_data = await self.db.find_one({"_id": "responsetime-stats"})
+        if stats_data and "response_times" in stats_data:
+            self.response_times = stats_data["response_times"]
+        
+        # Load pending tickets from database
+        pending_data = await self.db.find_one({"_id": "responsetime-pending"})
+        if pending_data and "tickets" in pending_data:
+            # Convert stored timestamps back to datetime objects
+            self.pending_tickets = {
+                int(thread_id): datetime.fromisoformat(timestamp)
+                for thread_id, timestamp in pending_data["tickets"].items()
+            }
 
     async def update_config(self):
         """Save configuration to database."""
         await self.db.find_one_and_update(
             {"_id": "responsetime-config"},
             {"$set": self.config},
+            upsert=True,
+        )
+    
+    async def save_stats(self):
+        """Save response time statistics to database."""
+        await self.db.find_one_and_update(
+            {"_id": "responsetime-stats"},
+            {"$set": {"response_times": self.response_times}},
+            upsert=True,
+        )
+    
+    async def save_pending_tickets(self):
+        """Save pending tickets to database."""
+        # Convert datetime objects to ISO format strings for storage
+        tickets_data = {
+            str(thread_id): timestamp.isoformat()
+            for thread_id, timestamp in self.pending_tickets.items()
+        }
+        await self.db.find_one_and_update(
+            {"_id": "responsetime-pending"},
+            {"$set": {"tickets": tickets_data}},
             upsert=True,
         )
 
@@ -52,6 +87,9 @@ class ResponseTime(commands.Cog):
         
         # Store the creation time for this thread
         self.pending_tickets[thread.id] = datetime.now(timezone.utc)
+        
+        # Save to database
+        await self.save_pending_tickets()
 
     @commands.Cog.listener()
     async def on_thread_reply(self, thread, from_mod, message, anonymous, plain):
@@ -78,14 +116,16 @@ class ResponseTime(commands.Cog):
         
         # Remove from pending tickets
         del self.pending_tickets[thread.id]
+        await self.save_pending_tickets()
         
         # Store for statistics
         self.response_times.append(time_delta.total_seconds())
+        await self.save_stats()
         
-        # Log the response time
-        await self.log_response_time(thread, thread.recipient, time_delta)
+        # Log the response time with the supporter who responded
+        await self.log_response_time(thread, thread.recipient, message.author, time_delta)
 
-    async def log_response_time(self, thread, creator, time_delta):
+    async def log_response_time(self, thread, creator, supporter, time_delta):
         """Send response time log to configured channel."""
         if self.config["log_channel_id"] is None:
             print("No log channel configured for response time logging")
@@ -122,8 +162,8 @@ class ResponseTime(commands.Cog):
         )
         
         embed.add_field(
-            name="Ticket ID",
-            value=f"`{thread.id}`",
+            name="Ticket Supporter",
+            value=f"{supporter.mention} ({supporter})",
             inline=True
         )
         
@@ -131,12 +171,6 @@ class ResponseTime(commands.Cog):
             name="Response Time",
             value=f"⏱️ **{time_str}**",
             inline=True
-        )
-        
-        embed.add_field(
-            name="Thread Channel",
-            value=thread.channel.mention if thread.channel else "N/A",
-            inline=False
         )
         
         # Add statistics if enabled
@@ -244,6 +278,7 @@ class ResponseTime(commands.Cog):
     async def responsetime_resetstats(self, ctx):
         """Reset response time statistics."""
         self.response_times.clear()
+        await self.save_stats()
         await ctx.send("✅ Response time statistics have been reset.")
 
     @checks.has_permissions(PermissionLevel.ADMINISTRATOR)
