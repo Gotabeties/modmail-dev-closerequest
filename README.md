@@ -4,3 +4,9 @@
 Allow your ticket staff to send a request to the customer if they want to close their ticket.
 
 ```?plugin add Gotabeties/modmail-dev-closerequest/closerequest@master```
+
+# Modmail Dev Response Time
+
+Reports response time of tickets from ticket creation to first response.
+
+```?plugin add Gotabeties/modmail-dev-closerequest/responsetime@master```
