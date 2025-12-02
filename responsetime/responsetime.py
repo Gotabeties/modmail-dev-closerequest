@@ -83,7 +83,7 @@ class ResponseTime(commands.Cog):
         self.response_times.append(time_delta.total_seconds())
         
         # Log the response time
-        await self.log_response_time(thread, creator, time_delta)
+        await self.log_response_time(thread, thread.recipient, time_delta)
 
     async def log_response_time(self, thread, creator, time_delta):
         """Send response time log to configured channel."""
@@ -117,7 +117,13 @@ class ResponseTime(commands.Cog):
         
         embed.add_field(
             name="Ticket Creator",
-            value=f"{thread.recipient.mention} ({thread.recipient})",
+            value=f"{creator.mention} ({creator})",
+            inline=True
+        )
+        
+        embed.add_field(
+            name="Ticket ID",
+            value=f"`{thread.id}`",
             inline=True
         )
         
@@ -154,10 +160,13 @@ class ResponseTime(commands.Cog):
         
         try:
             await log_channel.send(embed=embed)
+            print(f"Response time logged: {time_str} for thread {thread.id}")
         except discord.Forbidden:
             print(f"Missing permissions to send to log channel {log_channel.id}")
         except Exception as e:
             print(f"Error logging response time: {e}")
+            import traceback
+            traceback.print_exc()
 
     @checks.has_permissions(PermissionLevel.ADMINISTRATOR)
     @commands.group(invoke_without_command=True)
