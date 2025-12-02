@@ -63,6 +63,10 @@ class ResponseTime(commands.Cog):
         if not from_mod:
             return
         
+        # Ignore bot messages
+        if message.author.bot:
+            return
+        
         # Check if this ticket is pending first response
         if thread.id not in self.pending_tickets:
             return
@@ -84,10 +88,12 @@ class ResponseTime(commands.Cog):
     async def log_response_time(self, thread, creator, time_delta):
         """Send response time log to configured channel."""
         if self.config["log_channel_id"] is None:
+            print("No log channel configured for response time logging")
             return
         
         log_channel = self.bot.get_channel(self.config["log_channel_id"])
         if log_channel is None:
+            print(f"Log channel {self.config['log_channel_id']} not found")
             return
         
         # Format time delta
