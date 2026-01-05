@@ -6,7 +6,7 @@ from core.checks import PermissionLevel
 
 
 class ClaimThread(commands.Cog):
-    """Simple thread claim system using thread name suffix"""
+    """Simple claim system that appends a name to the thread title"""
 
     def __init__(self, bot):
         self.bot = bot
@@ -16,18 +16,15 @@ class ClaimThread(commands.Cog):
     @checks.thread_only()
     @commands.command()
     async def claim(self, ctx, *, name: str = None):
-        channel = ctx.channel
+        channel = ctx.thread.channel
         claimer_name = name or ctx.author.display_name
 
         data = await self.db.find_one({"thread_id": str(channel.id)})
-
         if data:
             await ctx.send("This thread is already claimed.")
             return
 
         original_name = channel.name
-
-        # Clean name input (discord-safe)
         claimer_name = claimer_name.replace(" ", "-")
 
         new_name = f"{original_name}-{claimer_name}"[:100]
@@ -51,12 +48,11 @@ class ClaimThread(commands.Cog):
 
     @checks.has_permissions(PermissionLevel.SUPPORTER)
     @checks.thread_only()
-    @commands.command()
+    @commands.command(name="unclaim")
     async def unclaim(self, ctx):
-        channel = ctx.channel
+        channel = ctx.thread.channel
 
         data = await self.db.find_one({"thread_id": str(channel.id)})
-
         if not data:
             await ctx.send("This thread is not claimed.")
             return
