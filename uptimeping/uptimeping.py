@@ -62,8 +62,8 @@ class HTTPPing(commands.Cog):
         
         # Start the ping task if enabled
         if self.config["enabled"] and self.config["url"]:
-            self.ping_task.change_interval(seconds=self.config["interval"])
-            self.ping_task.start()
+            if not self.ping_task.is_running():
+                self.ping_task.start()
 
     async def cog_unload(self):
         """Clean up when the cog is unloaded."""
@@ -88,9 +88,12 @@ class HTTPPing(commands.Cog):
             upsert=True,
         )
 
-    @tasks.loop(seconds=60)
+    @tasks.loop()
     async def ping_task(self):
         """Periodically ping the configured URL."""
+        # Wait for the configured interval
+        await asyncio.sleep(self.config["interval"])
+        
         if not self.config["enabled"] or not self.config["url"]:
             return
         
@@ -230,9 +233,7 @@ class HTTPPing(commands.Cog):
         
         # Restart task with new interval if running
         if self.ping_task.is_running():
-            self.ping_task.cancel()
-            self.ping_task.change_interval(seconds=seconds)
-            self.ping_task.start()
+            self.ping_task.restart()
         
         await ctx.send(f"✅ Ping interval set to: **{seconds} seconds**")
 
@@ -257,7 +258,6 @@ class HTTPPing(commands.Cog):
         
         if self.config["enabled"]:
             if not self.ping_task.is_running():
-                self.ping_task.change_interval(seconds=self.config["interval"])
                 self.ping_task.start()
             await ctx.send("✅ HTTP pinging is now **enabled**.")
         else:
