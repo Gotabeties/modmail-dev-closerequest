@@ -6,18 +6,27 @@ from core.checks import PermissionLevel
 
 
 class ClaimThread(commands.Cog):
-    """Simple claim system that appends a name to the thread title"""
+    """Claim system that renames the thread"""
 
     def __init__(self, bot):
         self.bot = bot
         self.db = self.bot.plugin_db.get_partition(self)
 
+    def _get_thread_channel(self, ctx):
+        if not hasattr(ctx, "thread") or ctx.thread is None:
+            return None
+        return ctx.thread.channel
+
     @checks.has_permissions(PermissionLevel.SUPPORTER)
-    @checks.thread_only()
     @commands.command()
     async def claim(self, ctx, *, name: str = None):
-        channel = ctx.thread.channel
+        channel = self._get_thread_channel(ctx)
+        if not channel:
+            await ctx.send("This command can only be used inside a Modmail thread.")
+            return
+
         claimer_name = name or ctx.author.display_name
+        claimer_name = claimer_name.replace(" ", "-")
 
         data = await self.db.find_one({"thread_id": str(channel.id)})
         if data:
@@ -25,8 +34,6 @@ class ClaimThread(commands.Cog):
             return
 
         original_name = channel.name
-        claimer_name = claimer_name.replace(" ", "-")
-
         new_name = f"{original_name}-{claimer_name}"[:100]
 
         try:
@@ -47,10 +54,12 @@ class ClaimThread(commands.Cog):
         await ctx.send(f"Thread claimed as **{claimer_name}**")
 
     @checks.has_permissions(PermissionLevel.SUPPORTER)
-    @checks.thread_only()
-    @commands.command(name="unclaim")
+    @commands.command()
     async def unclaim(self, ctx):
-        channel = ctx.thread.channel
+        channel = self._get_thread_channel(ctx)
+        if not channel:
+            await ctx.send("This command can only be used inside a Modmail thread.")
+            return
 
         data = await self.db.find_one({"thread_id": str(channel.id)})
         if not data:
