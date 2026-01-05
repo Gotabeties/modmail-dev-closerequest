@@ -1,5 +1,6 @@
 import discord
 from discord.ext import commands
+from typing import Optional
 
 from core import checks
 from core.checks import PermissionLevel
@@ -19,25 +20,18 @@ class ClaimThread(commands.Cog):
 
     @checks.has_permissions(PermissionLevel.SUPPORTER)
     @commands.command()
-    async def claim(self, ctx, name: str = None):  # REMOVED *, here
+    async def claim(self, ctx, name: Optional[str] = None):
         try:
             channel = self._get_thread_channel(ctx)
             if not channel:
                 await ctx.send("This command can only be used inside a Modmail thread.")
                 return
 
-            # Get the claimer name - prioritize argument, fallback to display name
+            # Get the claimer name
             if name:
-                claimer_name = str(name).strip()
+                claimer_name = str(name).strip().replace(" ", "-")
             else:
-                claimer_name = ctx.author.display_name
-            
-            claimer_name = claimer_name.replace(" ", "-")
-            
-            # Validate claimer name
-            if not claimer_name or len(claimer_name) == 0:
-                await ctx.send("Invalid name provided.")
-                return
+                claimer_name = ctx.author.display_name.replace(" ", "-")
 
             data = await self.db.find_one({"thread_id": str(channel.id)})
             if data:
@@ -46,19 +40,13 @@ class ClaimThread(commands.Cog):
 
             original_name = channel.name
             
-            # Remove any existing claim suffix to get the true original name
+            # Remove any existing claim suffix
             if "-" in original_name:
                 parts = original_name.rsplit("-", 1)
-                # Check if the last part looks like a claimer name (no numbers at start)
                 if len(parts) == 2 and parts[1] and not parts[1][0].isdigit():
                     original_name = parts[0]
             
             new_name = f"{original_name}-{claimer_name}"[:100]
-            
-            # Make sure new_name is different from current name
-            if new_name == channel.name:
-                await ctx.send(f"Thread is already named '{new_name}'")
-                return
 
             try:
                 await channel.edit(name=new_name)
@@ -81,9 +69,8 @@ class ClaimThread(commands.Cog):
             await ctx.send(f"Thread claimed as **{claimer_name}**")
             
         except Exception as e:
-            await ctx.send(f"An unexpected error occurred: {type(e).__name__}: {e}")
-            import traceback
-            traceback.print_exc()
+            await ctx.send(f"Error in claim command: {type(e).__name__}: {e}")
+            raise  # This will show the full traceback in console
 
     @checks.has_permissions(PermissionLevel.SUPPORTER)
     @commands.command()
@@ -121,9 +108,8 @@ class ClaimThread(commands.Cog):
             await ctx.send("Thread unclaimed.")
             
         except Exception as e:
-            await ctx.send(f"An unexpected error occurred: {type(e).__name__}: {e}")
-            import traceback
-            traceback.print_exc()
+            await ctx.send(f"Error in unclaim command: {type(e).__name__}: {e}")
+            raise  # This will show the full traceback in console
 
 
 async def setup(bot):
