@@ -19,7 +19,7 @@ class ClaimThread(commands.Cog):
 
     @checks.has_permissions(PermissionLevel.SUPPORTER)
     @commands.command()
-    async def claim(self, ctx, *, name: str = None):
+    async def claim(self, ctx, name: str = None):  # REMOVED *, here
         try:
             channel = self._get_thread_channel(ctx)
             if not channel:
