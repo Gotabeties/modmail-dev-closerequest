@@ -26,8 +26,18 @@ class ClaimThread(commands.Cog):
                 await ctx.send("This command can only be used inside a Modmail thread.")
                 return
 
-            claimer_name = name or ctx.author.display_name
+            # Get the claimer name - prioritize argument, fallback to display name
+            if name:
+                claimer_name = str(name).strip()
+            else:
+                claimer_name = ctx.author.display_name
+            
             claimer_name = claimer_name.replace(" ", "-")
+            
+            # Validate claimer name
+            if not claimer_name or len(claimer_name) == 0:
+                await ctx.send("Invalid name provided.")
+                return
 
             data = await self.db.find_one({"thread_id": str(channel.id)})
             if data:
@@ -40,10 +50,15 @@ class ClaimThread(commands.Cog):
             if "-" in original_name:
                 parts = original_name.rsplit("-", 1)
                 # Check if the last part looks like a claimer name (no numbers at start)
-                if len(parts) == 2 and not parts[1][0].isdigit():
+                if len(parts) == 2 and parts[1] and not parts[1][0].isdigit():
                     original_name = parts[0]
             
             new_name = f"{original_name}-{claimer_name}"[:100]
+            
+            # Make sure new_name is different from current name
+            if new_name == channel.name:
+                await ctx.send(f"Thread is already named '{new_name}'")
+                return
 
             try:
                 await channel.edit(name=new_name)
@@ -51,7 +66,7 @@ class ClaimThread(commands.Cog):
                 await ctx.send("I don't have permission to rename this thread.")
                 return
             except discord.HTTPException as e:
-                if e.status == 429:
+                if hasattr(e, 'status') and e.status == 429:
                     await ctx.send("Please wait before claiming - Discord rate limit (max 2 name changes per 10 minutes).")
                 else:
                     await ctx.send(f"Failed to rename the thread: {e}")
@@ -67,7 +82,8 @@ class ClaimThread(commands.Cog):
             
         except Exception as e:
             await ctx.send(f"An unexpected error occurred: {type(e).__name__}: {e}")
-            print(f"Claim command error: {type(e).__name__}: {e}")
+            import traceback
+            traceback.print_exc()
 
     @checks.has_permissions(PermissionLevel.SUPPORTER)
     @commands.command()
@@ -95,7 +111,7 @@ class ClaimThread(commands.Cog):
                 await ctx.send("I don't have permission to rename this thread.")
                 return
             except discord.HTTPException as e:
-                if e.status == 429:
+                if hasattr(e, 'status') and e.status == 429:
                     await ctx.send("Please wait before unclaiming - Discord rate limit (max 2 name changes per 10 minutes).")
                 else:
                     await ctx.send(f"Failed to rename the thread: {e}")
@@ -106,7 +122,8 @@ class ClaimThread(commands.Cog):
             
         except Exception as e:
             await ctx.send(f"An unexpected error occurred: {type(e).__name__}: {e}")
-            print(f"Unclaim command error: {type(e).__name__}: {e}")
+            import traceback
+            traceback.print_exc()
 
 
 async def setup(bot):
