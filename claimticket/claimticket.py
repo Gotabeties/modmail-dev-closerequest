@@ -19,19 +19,26 @@ class ClaimThread(commands.Cog):
         channel = ctx.thread.channel
         user = ctx.author
 
-        existing = await self.db.find_one(
-            {"thread_id": str(channel.id)}
-        )
+        data = await self.db.find_one({"thread_id": str(channel.id)})
 
-        if existing:
-            await ctx.send("This thread is already claimed.")
-            return
+        # If already claimed
+        if data:
+            if data["claimer_id"] == str(user.id):
+                await ctx.send("You already claimed this thread.")
+                return
+            else:
+                await ctx.send("This thread is already claimed by someone else.")
+                return
 
         original_name = channel.name
-        new_name = f"{original_name}-{user.name}"
 
-        # Discord has a 100 character limit
-        new_name = new_name[:100]
+        # Prevent double-appending the same name
+        if original_name.endswith(f"-{user.name}"):
+            base_name = original_name
+        else:
+            base_name = original_name
+
+        new_name = f"{base_name}-{user.name}"[:100]
 
         await channel.edit(name=new_name)
 
@@ -42,6 +49,7 @@ class ClaimThread(commands.Cog):
         })
 
         await ctx.send(f"Thread claimed by **{user.display_name}**")
+
 
     @checks.has_permissions(PermissionLevel.SUPPORTER)
     @checks.thread_only()
