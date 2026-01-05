@@ -6,7 +6,7 @@ from core.checks import PermissionLevel
 
 
 class ClaimThread(commands.Cog):
-    """Simple claim system that appends claimer name to the thread title"""
+    """Simple thread claim system using thread name suffix"""
 
     def __init__(self, bot):
         self.bot = bot
@@ -15,64 +15,62 @@ class ClaimThread(commands.Cog):
     @checks.has_permissions(PermissionLevel.SUPPORTER)
     @checks.thread_only()
     @commands.command()
-    async def claim(self, ctx):
-        channel = ctx.thread.channel
-        user = ctx.author
+    async def claim(self, ctx, *, name: str = None):
+        channel = ctx.channel
+        claimer_name = name or ctx.author.display_name
 
         data = await self.db.find_one({"thread_id": str(channel.id)})
 
-        # If already claimed
         if data:
-            if data["claimer_id"] == str(user.id):
-                await ctx.send("You already claimed this thread.")
-                return
-            else:
-                await ctx.send("This thread is already claimed by someone else.")
-                return
+            await ctx.send("This thread is already claimed.")
+            return
 
         original_name = channel.name
 
-        # Prevent double-appending the same name
-        if original_name.endswith(f"-{user.name}"):
-            base_name = original_name
-        else:
-            base_name = original_name
+        # Clean name input (discord-safe)
+        claimer_name = claimer_name.replace(" ", "-")
 
-        new_name = f"{base_name}-{user.name}"[:100]
+        new_name = f"{original_name}-{claimer_name}"[:100]
 
-        await channel.edit(name=new_name)
+        try:
+            await channel.edit(name=new_name)
+        except discord.Forbidden:
+            await ctx.send("I don't have permission to rename this thread.")
+            return
+        except discord.HTTPException:
+            await ctx.send("Failed to rename the thread.")
+            return
 
         await self.db.insert_one({
             "thread_id": str(channel.id),
             "original_name": original_name,
-            "claimer_id": str(user.id)
+            "claimer": claimer_name
         })
 
-        await ctx.send(f"Thread claimed by **{user.display_name}**")
-
+        await ctx.send(f"Thread claimed as **{claimer_name}**")
 
     @checks.has_permissions(PermissionLevel.SUPPORTER)
     @checks.thread_only()
     @commands.command()
     async def unclaim(self, ctx):
-        channel = ctx.thread.channel
-        user = ctx.author
+        channel = ctx.channel
 
-        data = await self.db.find_one(
-            {"thread_id": str(channel.id)}
-        )
+        data = await self.db.find_one({"thread_id": str(channel.id)})
 
         if not data:
             await ctx.send("This thread is not claimed.")
             return
 
-        if str(user.id) != data["claimer_id"]:
-            await ctx.send("You did not claim this thread.")
+        try:
+            await channel.edit(name=data["original_name"])
+        except discord.Forbidden:
+            await ctx.send("I don't have permission to rename this thread.")
+            return
+        except discord.HTTPException:
+            await ctx.send("Failed to rename the thread.")
             return
 
-        await channel.edit(name=data["original_name"])
         await self.db.delete_one({"thread_id": str(channel.id)})
-
         await ctx.send("Thread unclaimed.")
 
 async def setup(bot):
