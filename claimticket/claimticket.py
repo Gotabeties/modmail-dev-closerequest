@@ -1,6 +1,7 @@
 import discord
 from discord.ext import commands
 from typing import Optional
+import traceback
 
 from core import checks
 from core.checks import PermissionLevel
@@ -22,7 +23,11 @@ class ClaimThread(commands.Cog):
     @commands.command()
     async def claim(self, ctx, name: Optional[str] = None):
         try:
+            await ctx.send(f"DEBUG: Command started. Name arg: {repr(name)}")
+            
             channel = self._get_thread_channel(ctx)
+            await ctx.send(f"DEBUG: Channel: {channel}")
+            
             if not channel:
                 await ctx.send("This command can only be used inside a Modmail thread.")
                 return
@@ -32,8 +37,12 @@ class ClaimThread(commands.Cog):
                 claimer_name = str(name).strip().replace(" ", "-")
             else:
                 claimer_name = ctx.author.display_name.replace(" ", "-")
+            
+            await ctx.send(f"DEBUG: Claimer name: {claimer_name}")
 
             data = await self.db.find_one({"thread_id": str(channel.id)})
+            await ctx.send(f"DEBUG: Existing data: {data}")
+            
             if data:
                 await ctx.send("This thread is already claimed.")
                 return
@@ -47,9 +56,11 @@ class ClaimThread(commands.Cog):
                     original_name = parts[0]
             
             new_name = f"{original_name}-{claimer_name}"[:100]
+            await ctx.send(f"DEBUG: Will rename from '{channel.name}' to '{new_name}'")
 
             try:
                 await channel.edit(name=new_name)
+                await ctx.send("DEBUG: Channel renamed successfully")
             except discord.Forbidden:
                 await ctx.send("I don't have permission to rename this thread.")
                 return
@@ -65,23 +76,32 @@ class ClaimThread(commands.Cog):
                 "original_name": original_name,
                 "claimer": claimer_name
             })
+            await ctx.send("DEBUG: Database updated")
 
             await ctx.send(f"Thread claimed as **{claimer_name}**")
             
         except Exception as e:
-            await ctx.send(f"Error in claim command: {type(e).__name__}: {e}")
-            raise  # This will show the full traceback in console
+            error_msg = f"ERROR: {type(e).__name__}: {e}\n```\n{traceback.format_exc()}\n```"
+            # Split message if too long
+            if len(error_msg) > 2000:
+                await ctx.send(error_msg[:1990] + "...```")
+            else:
+                await ctx.send(error_msg)
 
     @checks.has_permissions(PermissionLevel.SUPPORTER)
     @commands.command()
     async def unclaim(self, ctx):
         try:
+            await ctx.send("DEBUG: Unclaim command started")
+            
             channel = self._get_thread_channel(ctx)
             if not channel:
                 await ctx.send("This command can only be used inside a Modmail thread.")
                 return
 
             data = await self.db.find_one({"thread_id": str(channel.id)})
+            await ctx.send(f"DEBUG: Found data: {data}")
+            
             if not data:
                 await ctx.send("This thread is not claimed.")
                 return
@@ -91,6 +111,8 @@ class ClaimThread(commands.Cog):
                 await ctx.send("Database error: original name not found. Removing claim data.")
                 await self.db.delete_one({"thread_id": str(channel.id)})
                 return
+
+            await ctx.send(f"DEBUG: Will rename to '{original_name}'")
 
             try:
                 await channel.edit(name=original_name)
@@ -108,8 +130,11 @@ class ClaimThread(commands.Cog):
             await ctx.send("Thread unclaimed.")
             
         except Exception as e:
-            await ctx.send(f"Error in unclaim command: {type(e).__name__}: {e}")
-            raise  # This will show the full traceback in console
+            error_msg = f"ERROR: {type(e).__name__}: {e}\n```\n{traceback.format_exc()}\n```"
+            if len(error_msg) > 2000:
+                await ctx.send(error_msg[:1990] + "...```")
+            else:
+                await ctx.send(error_msg)
 
 
 async def setup(bot):
