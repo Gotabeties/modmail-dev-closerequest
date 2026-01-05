@@ -12,11 +12,19 @@ class ClaimThread(commands.Cog):
         self.bot = bot
         self.db = self.bot.plugin_db.get_partition(self)
 
+    def _get_thread_channel(self, ctx):
+        if not hasattr(ctx, "thread") or ctx.thread is None:
+            return None
+        return ctx.thread.channel
+
     @checks.has_permissions(PermissionLevel.SUPPORTER)
-    @checks.thread_only()
     @commands.command()
     async def claim(self, ctx, *, name: str = None):
-        channel = ctx.thread.channel
+        channel = self._get_thread_channel(ctx)
+        if not channel:
+            await ctx.send("This command can only be used inside a Modmail thread.")
+            return
+
         claimer_name = name or ctx.author.display_name
         claimer_name = claimer_name.replace(" ", "-")
 
@@ -28,7 +36,17 @@ class ClaimThread(commands.Cog):
         original_name = channel.name
         new_name = f"{original_name}-{claimer_name}"[:100]
 
-        await channel.edit(name=new_name)
+        try:
+            await channel.edit(name=new_name)
+        except discord.Forbidden:
+            await ctx.send("I don't have permission to rename this thread.")
+            return
+        except discord.HTTPException as e:
+            await ctx.send(f"Failed to rename the thread: {e}")
+            return
+        except Exception as e:
+            await ctx.send(f"An unexpected error occurred: {e}")
+            return
 
         await self.db.insert_one({
             "thread_id": str(channel.id),
@@ -38,22 +56,41 @@ class ClaimThread(commands.Cog):
 
         await ctx.send(f"Thread claimed as **{claimer_name}**")
 
-    # IMPORTANT: primary name is NOT "unclaim"
     @checks.has_permissions(PermissionLevel.SUPPORTER)
-    @checks.thread_only()
-    @commands.command(name="clearclaim", aliases=["unclaim"])
-    async def clearclaim(self, ctx):
-        channel = ctx.thread.channel
+    @commands.command()
+    async def unclaim(self, ctx):
+        channel = self._get_thread_channel(ctx)
+        if not channel:
+            await ctx.send("This command can only be used inside a Modmail thread.")
+            return
 
         data = await self.db.find_one({"thread_id": str(channel.id)})
         if not data:
             await ctx.send("This thread is not claimed.")
             return
 
-        await channel.edit(name=data["original_name"])
-        await self.db.delete_one({"thread_id": str(channel.id)})
+        try:
+            await channel.edit(name=data["original_name"])
+        except discord.Forbidden:
+            await ctx.send("I don't have permission to rename this thread.")
+            return
+        except discord.HTTPException as e:
+            if e.status == 429:  # Rate limited
+                await ctx.send("Please wait before unclaiming - Discord rate limit (max 2 name changes per 10 minutes).")
+            else:
+                await ctx.send(f"Failed to rename the thread: {e}")
+            return
+        except KeyError:
+            await ctx.send("Database error: original name not found. Removing claim data.")
+            await self.db.delete_one({"thread_id": str(channel.id)})
+            return
+        except Exception as e:
+            await ctx.send(f"An unexpected error occurred: {e}")
+            return
 
+        await self.db.delete_one({"thread_id": str(channel.id)})
         await ctx.send("Thread unclaimed.")
+
 
 async def setup(bot):
     await bot.add_cog(ClaimThread(bot))
