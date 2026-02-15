@@ -4,6 +4,7 @@ The panel message is sent as an embed.
 All submissions validate Discord invite links, save to Supabase, and post an embed to a configured channel.
 If `hiringconfig usepaneloutput true` is enabled, the panel embed is automatically re-sent so it stays at the bottom.
 Each posted hiring embed includes the request ID/UUID in the footer.
+Hiring listing embeds always use the title `New Hiring Post`.
 
 Panel setup commands:
 
@@ -16,7 +17,7 @@ Panel setup commands:
 - `hiring requestinfo <id_or_uuid>`
 - `hiring deleterequest <id_or_uuid>`
 
-`hiring setembedtitle` updates both the hiring post embed title and the panel/menu embed title.
+`hiring setembedtitle` updates the panel/menu embed title.
 
 ## Supabase Setup
 
