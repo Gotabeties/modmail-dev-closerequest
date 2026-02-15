@@ -20,7 +20,9 @@ Sends HEAD, GET, or POST requests to a configurable URL every minute (or custom 
 
 # Hiring Form
 
-Adds a button panel that opens a form, validates Discord invite links, saves to Supabase, and posts an embed to a configured channel.
+Adds a Hiring Request Menu panel with private controls to add, edit, and delete hiring requests.
+Each user can keep up to 3 open requests at a time, and all submissions validate Discord invite links,
+save to Supabase, and post an embed to a configured channel.
 
 ```?plugin add Gotabeties/modmail-dev-closerequest/hiring@master```
 ```?hiringconfig```
@@ -48,6 +50,7 @@ Create table `hiring_submissions` (or your custom table name) with these columns
 - `guild_name` (text)
 - `user_id` (text)
 - `username` (text)
+- `company_name` (text)
 - `position` (text)
 - `description` (text)
 - `discord_server_link` (text)
@@ -62,6 +65,7 @@ create table if not exists public.hiring_submissions (
 	guild_name text not null,
 	user_id text not null,
 	username text not null,
+	company_name text not null,
 	position text not null,
 	description text not null,
 	discord_server_link text not null,
