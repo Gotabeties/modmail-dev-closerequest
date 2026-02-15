@@ -148,7 +148,7 @@ class HiringSubmissionModal(discord.ui.Modal, title="Hiring Submission"):
                 guild=guild,
                 user=interaction.user,
                 request_id=request_id,
-                request_data=base_payload,
+                request_data=payload,
             )
             if not ok:
                 return await interaction.followup.send(
@@ -176,11 +176,27 @@ class HiringSubmissionModal(discord.ui.Modal, title="Hiring Submission"):
                     ephemeral=True,
                 )
 
+            ok_existing, existing = await self.cog.get_request_by_id(
+                request_id=str(self.request_id),
+                guild_id=str(guild.id),
+            )
+            request_data = {
+                "guild_id": str(guild.id),
+                "guild_name": guild.name,
+                "user_id": str(interaction.user.id),
+                "username": str(interaction.user),
+                **base_payload,
+                "submitted_at": datetime.now(timezone.utc).isoformat(),
+            }
+            if ok_existing and isinstance(existing, dict):
+                request_data["submitted_at"] = str(existing.get("submitted_at") or request_data["submitted_at"])
+                request_data["username"] = str(existing.get("username") or request_data["username"])
+
             ok, result = await self.cog.post_or_repost_hiring_request(
                 guild=guild,
                 user=interaction.user,
                 request_id=self.request_id,
-                request_data=base_payload,
+                request_data=request_data,
             )
             if not ok:
                 return await interaction.followup.send(
@@ -413,7 +429,6 @@ class Hiring(commands.Cog):
             "panel_embed_title": "Hiring Request Menu",
             "output_channel_id": None,
             "use_panel_channel_for_output": False,
-            "hiring_embed_title": "Now Hiring",
             "supabase_url": None,
             "supabase_key": None,
             "supabase_table": "hiring_submissions",
@@ -528,7 +543,7 @@ class Hiring(commands.Cog):
 
     def _build_hiring_embed(self, user: discord.abc.User, request_data: Dict, request_id: Optional[str] = None) -> discord.Embed:
         embed = discord.Embed(
-            title=self.config.get("hiring_embed_title") or "Now Hiring",
+            title="New Hiring Post",
             color=discord.Color.blue(),
             timestamp=datetime.now(timezone.utc),
         )
@@ -537,8 +552,10 @@ class Hiring(commands.Cog):
         embed.add_field(name="Position", value=request_data["position"], inline=False)
         embed.add_field(name="Description", value=request_data["description"], inline=False)
         embed.add_field(name="Discord Server Link", value=request_data["discord_server_link"], inline=False)
-        if request_id:
-            embed.set_footer(text=f"Request ID: {request_id}")
+        posted_by = str(request_data.get("username") or str(user))
+        submitted_at = str(request_data.get("submitted_at") or "Unknown")
+        post_id_text = str(request_id) if request_id is not None else "Unknown"
+        embed.set_footer(text=f"Post ID: {post_id_text} · Posted by: {posted_by} · Submitted: {submitted_at}")
         return embed
 
     async def remove_request_message(self, request_id: str, guild: discord.Guild):
@@ -799,16 +816,15 @@ class Hiring(commands.Cog):
     @checks.has_permissions(PermissionLevel.ADMINISTRATOR)
     @hiring_group.command(name="setembedtitle")
     async def hiringconfig_setembedtitle(self, ctx, *, title: str):
-        """Set the title used for hiring and panel/menu embeds."""
+        """Set the title used for panel/menu embeds."""
         title = title.strip()
         if not title:
             return await ctx.send("❌ Embed title cannot be empty.")
 
         normalized = title[:256]
-        self.config["hiring_embed_title"] = normalized
         self.config["panel_embed_title"] = normalized
         await self.update_config()
-        await ctx.send(f"✅ Embed title set to: {normalized}")
+        await ctx.send(f"✅ Panel/menu embed title set to: {normalized}")
 
     @checks.has_permissions(PermissionLevel.ADMINISTRATOR)
     @hiringconfig.command(name="usepaneloutput")
@@ -923,11 +939,7 @@ class Hiring(commands.Cog):
             value="Enabled" if self.config.get("use_panel_channel_for_output") else "Disabled",
             inline=True,
         )
-        embed.add_field(
-            name="Hiring Embed Title",
-            value=(self.config.get("hiring_embed_title") or "Now Hiring")[:256],
-            inline=False,
-        )
+        embed.add_field(name="Hiring Post Title", value="New Hiring Post", inline=False)
         embed.add_field(
             name="Panel Embed Title",
             value=(self.config.get("panel_embed_title") or "Hiring Request Menu")[:256],
