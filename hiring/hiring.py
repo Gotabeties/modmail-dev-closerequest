@@ -814,7 +814,7 @@ class Hiring(commands.Cog):
         await ctx.send(f"✅ Hiring submissions will be posted in {channel.mention}")
 
     @checks.has_permissions(PermissionLevel.ADMINISTRATOR)
-    @hiring_group.command(name="setembedtitle")
+    @hiringconfig.command(name="setembedtitle")
     async def hiringconfig_setembedtitle(self, ctx, *, title: str):
         """Set the title used for panel/menu embeds."""
         title = title.strip()
