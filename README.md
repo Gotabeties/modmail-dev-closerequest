@@ -36,6 +36,7 @@ Panel setup commands:
 - `hiringconfig sendpanel`
 - `hiringconfig setoutputchannel <#channel>`
 - `hiringconfig usepaneloutput <true|false>`
+- `hiringconfig setembedtitle <title>`
 
 ## Supabase Setup
 

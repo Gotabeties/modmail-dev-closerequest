@@ -1,4 +1,5 @@
 import re
+import traceback
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
 from urllib.parse import urlparse
@@ -212,19 +213,26 @@ class HiringEditRequestSelect(discord.ui.Select):
         super().__init__(placeholder="Select a request to edit", min_values=1, max_values=1, options=options)
 
     async def callback(self, interaction: discord.Interaction):
-        selected_id = self.values[0]
-        request = self.requests_map.get(selected_id)
-        if request is None:
-            return await interaction.response.send_message("❌ Request not found.", ephemeral=True)
+        try:
+            selected_id = self.values[0]
+            request = self.requests_map.get(selected_id)
+            if request is None:
+                return await interaction.response.send_message("❌ Request not found.", ephemeral=True)
 
-        await interaction.response.send_modal(
-            HiringSubmissionModal(
-                cog=self.cog,
-                mode="edit",
-                request_id=int(selected_id),
-                initial_data=request,
+            await interaction.response.send_modal(
+                HiringSubmissionModal(
+                    cog=self.cog,
+                    mode="edit",
+                    request_id=int(selected_id),
+                    initial_data=request,
+                )
             )
-        )
+        except Exception as exc:
+            await self.cog.send_interaction_debug(
+                interaction=interaction,
+                context="Edit request selection failed.",
+                exc=exc,
+            )
 
 
 class HiringDeleteRequestSelect(discord.ui.Select):
@@ -248,23 +256,30 @@ class HiringDeleteRequestSelect(discord.ui.Select):
         super().__init__(placeholder="Select a request to delete", min_values=1, max_values=1, options=options)
 
     async def callback(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
-        selected_id = self.values[0]
+        try:
+            await interaction.response.defer(ephemeral=True)
+            selected_id = self.values[0]
 
-        guild = interaction.guild
-        if guild is None:
-            return await interaction.followup.send("❌ This can only be used in a server.", ephemeral=True)
+            guild = interaction.guild
+            if guild is None:
+                return await interaction.followup.send("❌ This can only be used in a server.", ephemeral=True)
 
-        ok, result = await self.cog.delete_request(
-            request_id=int(selected_id),
-            guild_id=str(guild.id),
-            user_id=str(interaction.user.id),
-        )
-        if not ok:
-            return await interaction.followup.send(f"❌ Could not delete request: {result}", ephemeral=True)
+            ok, result = await self.cog.delete_request(
+                request_id=int(selected_id),
+                guild_id=str(guild.id),
+                user_id=str(interaction.user.id),
+            )
+            if not ok:
+                return await interaction.followup.send(f"❌ Could not delete request: {result}", ephemeral=True)
 
-        await self.cog.remove_request_message(request_id=int(selected_id), guild=guild)
-        await interaction.followup.send("✅ Hiring request deleted.", ephemeral=True)
+            await self.cog.remove_request_message(request_id=int(selected_id), guild=guild)
+            await interaction.followup.send("✅ Hiring request deleted.", ephemeral=True)
+        except Exception as exc:
+            await self.cog.send_interaction_debug(
+                interaction=interaction,
+                context="Delete request selection failed.",
+                exc=exc,
+            )
 
 
 class HiringRequestSelectView(discord.ui.View):
@@ -287,53 +302,67 @@ class HiringRequestMenuView(discord.ui.View):
 
     @discord.ui.button(label="Edit Current Request", style=discord.ButtonStyle.secondary)
     async def edit_request(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer(ephemeral=True)
-        guild = interaction.guild
-        if guild is None:
-            return await interaction.followup.send("❌ This can only be used in a server.", ephemeral=True)
+        try:
+            await interaction.response.defer(ephemeral=True)
+            guild = interaction.guild
+            if guild is None:
+                return await interaction.followup.send("❌ This can only be used in a server.", ephemeral=True)
 
-        ok, result = await self.cog.list_open_requests(str(guild.id), str(interaction.user.id))
-        if not ok:
-            return await interaction.followup.send(f"❌ Could not load requests: {result}", ephemeral=True)
+            ok, result = await self.cog.list_open_requests(str(guild.id), str(interaction.user.id))
+            if not ok:
+                return await interaction.followup.send(f"❌ Could not load requests: {result}", ephemeral=True)
 
-        if not result:
-            return await interaction.followup.send("ℹ️ You have no open hiring requests to edit.", ephemeral=True)
+            if not result:
+                return await interaction.followup.send("ℹ️ You have no open hiring requests to edit.", ephemeral=True)
 
-        embed = discord.Embed(
-            title="Edit Request",
-            description="Select one of your active requests to edit.",
-            color=discord.Color.blurple(),
-        )
-        await interaction.followup.send(
-            embed=embed,
-            view=HiringRequestSelectView(self.cog, action="edit", requests=result),
-            ephemeral=True,
-        )
+            embed = discord.Embed(
+                title="Edit Request",
+                description="Select one of your active requests to edit.",
+                color=discord.Color.blurple(),
+            )
+            await interaction.followup.send(
+                embed=embed,
+                view=HiringRequestSelectView(self.cog, action="edit", requests=result),
+                ephemeral=True,
+            )
+        except Exception as exc:
+            await self.cog.send_interaction_debug(
+                interaction=interaction,
+                context="Edit menu action failed.",
+                exc=exc,
+            )
 
     @discord.ui.button(label="Delete Old Request", style=discord.ButtonStyle.danger)
     async def delete_request(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer(ephemeral=True)
-        guild = interaction.guild
-        if guild is None:
-            return await interaction.followup.send("❌ This can only be used in a server.", ephemeral=True)
+        try:
+            await interaction.response.defer(ephemeral=True)
+            guild = interaction.guild
+            if guild is None:
+                return await interaction.followup.send("❌ This can only be used in a server.", ephemeral=True)
 
-        ok, result = await self.cog.list_open_requests(str(guild.id), str(interaction.user.id))
-        if not ok:
-            return await interaction.followup.send(f"❌ Could not load requests: {result}", ephemeral=True)
+            ok, result = await self.cog.list_open_requests(str(guild.id), str(interaction.user.id))
+            if not ok:
+                return await interaction.followup.send(f"❌ Could not load requests: {result}", ephemeral=True)
 
-        if not result:
-            return await interaction.followup.send("ℹ️ You have no open hiring requests to delete.", ephemeral=True)
+            if not result:
+                return await interaction.followup.send("ℹ️ You have no open hiring requests to delete.", ephemeral=True)
 
-        embed = discord.Embed(
-            title="Delete Request",
-            description="Select one of your active requests to delete.",
-            color=discord.Color.red(),
-        )
-        await interaction.followup.send(
-            embed=embed,
-            view=HiringRequestSelectView(self.cog, action="delete", requests=result),
-            ephemeral=True,
-        )
+            embed = discord.Embed(
+                title="Delete Request",
+                description="Select one of your active requests to delete.",
+                color=discord.Color.red(),
+            )
+            await interaction.followup.send(
+                embed=embed,
+                view=HiringRequestSelectView(self.cog, action="delete", requests=result),
+                ephemeral=True,
+            )
+        except Exception as exc:
+            await self.cog.send_interaction_debug(
+                interaction=interaction,
+                context="Delete menu action failed.",
+                exc=exc,
+            )
 
 
 class HiringPanelView(discord.ui.View):
@@ -380,6 +409,7 @@ class Hiring(commands.Cog):
             "panel_message_id": None,
             "output_channel_id": None,
             "use_panel_channel_for_output": False,
+            "hiring_embed_title": "Now Hiring",
             "supabase_url": None,
             "supabase_key": None,
             "supabase_table": "hiring_submissions",
@@ -417,6 +447,23 @@ class Hiring(commands.Cog):
             {"$set": {"map": self.request_message_map}},
             upsert=True,
         )
+
+    async def send_interaction_debug(self, interaction: discord.Interaction, context: str, exc: Exception):
+        detail = f"{type(exc).__name__}: {exc}"
+        trace = traceback.format_exc()
+        if trace and trace != "NoneType: None\n":
+            detail = f"{detail}\n{trace}"
+
+        detail = detail[:1400]
+        message = f"❌ {context}\n```\n{detail}\n```"
+
+        try:
+            if interaction.response.is_done():
+                await interaction.followup.send(message, ephemeral=True)
+            else:
+                await interaction.response.send_message(message, ephemeral=True)
+        except Exception:
+            pass
 
     async def _send_or_resend_panel_message(self, guild: discord.Guild):
         panel_channel_id = self.config.get("panel_channel_id")
@@ -477,7 +524,7 @@ class Hiring(commands.Cog):
 
     def _build_hiring_embed(self, user: discord.abc.User, request_data: Dict) -> discord.Embed:
         embed = discord.Embed(
-            title="Now Hiring",
+            title=self.config.get("hiring_embed_title") or "Now Hiring",
             color=discord.Color.blue(),
             timestamp=datetime.now(timezone.utc),
         )
@@ -695,6 +742,18 @@ class Hiring(commands.Cog):
         await ctx.send(f"✅ Hiring submissions will be posted in {channel.mention}")
 
     @checks.has_permissions(PermissionLevel.ADMINISTRATOR)
+    @hiringconfig.command(name="setembedtitle")
+    async def hiringconfig_setembedtitle(self, ctx, *, title: str):
+        """Set the title used for hiring submission embeds."""
+        title = title.strip()
+        if not title:
+            return await ctx.send("❌ Embed title cannot be empty.")
+
+        self.config["hiring_embed_title"] = title[:256]
+        await self.update_config()
+        await ctx.send(f"✅ Hiring embed title set to: {self.config['hiring_embed_title']}")
+
+    @checks.has_permissions(PermissionLevel.ADMINISTRATOR)
     @hiringconfig.command(name="usepaneloutput")
     async def hiringconfig_usepaneloutput(self, ctx, enabled: bool):
         """Toggle posting hiring embeds to panel channel instead of output channel."""
@@ -759,6 +818,11 @@ class Hiring(commands.Cog):
             name="Use Panel as Output",
             value="Enabled" if self.config.get("use_panel_channel_for_output") else "Disabled",
             inline=True,
+        )
+        embed.add_field(
+            name="Hiring Embed Title",
+            value=(self.config.get("hiring_embed_title") or "Now Hiring")[:256],
+            inline=False,
         )
         embed.add_field(
             name="Supabase URL",
