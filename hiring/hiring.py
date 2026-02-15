@@ -386,8 +386,9 @@ class HiringPanelView(discord.ui.View):
 
         await interaction.response.defer(ephemeral=True)
         count = await self.cog.get_open_request_count(str(interaction.guild.id), str(interaction.user.id))
+        menu_title = (self.cog.config.get("panel_embed_title") or "Hiring Request Menu")[:220]
         menu_embed = discord.Embed(
-            title=f"Hiring Request Menu ({count}/{self.cog.max_open_requests})",
+            title=f"{menu_title} ({count}/{self.cog.max_open_requests})",
             description="Use the buttons below to add, edit, or delete your hiring requests.",
             color=discord.Color.blurple(),
         )
@@ -409,6 +410,7 @@ class Hiring(commands.Cog):
             "panel_channel_id": None,
             "panel_message": "Click the button below to submit a hiring post.",
             "panel_message_id": None,
+            "panel_embed_title": "Hiring Request Menu",
             "output_channel_id": None,
             "use_panel_channel_for_output": False,
             "hiring_embed_title": "Now Hiring",
@@ -486,7 +488,7 @@ class Hiring(commands.Cog):
 
         panel_message = self.config.get("panel_message") or "Click the button below to submit a hiring post."
         embed = discord.Embed(
-            title="Hiring Request Menu",
+            title=(self.config.get("panel_embed_title") or "Hiring Request Menu")[:256],
             description=panel_message,
             color=self.bot.main_color,
         )
@@ -746,14 +748,16 @@ class Hiring(commands.Cog):
     @checks.has_permissions(PermissionLevel.ADMINISTRATOR)
     @hiringconfig.command(name="setembedtitle")
     async def hiringconfig_setembedtitle(self, ctx, *, title: str):
-        """Set the title used for hiring submission embeds."""
+        """Set the title used for hiring and panel/menu embeds."""
         title = title.strip()
         if not title:
             return await ctx.send("❌ Embed title cannot be empty.")
 
-        self.config["hiring_embed_title"] = title[:256]
+        normalized = title[:256]
+        self.config["hiring_embed_title"] = normalized
+        self.config["panel_embed_title"] = normalized
         await self.update_config()
-        await ctx.send(f"✅ Hiring embed title set to: {self.config['hiring_embed_title']}")
+        await ctx.send(f"✅ Embed title set to: {normalized}")
 
     @checks.has_permissions(PermissionLevel.ADMINISTRATOR)
     @hiringconfig.command(name="usepaneloutput")
@@ -824,6 +828,11 @@ class Hiring(commands.Cog):
         embed.add_field(
             name="Hiring Embed Title",
             value=(self.config.get("hiring_embed_title") or "Now Hiring")[:256],
+            inline=False,
+        )
+        embed.add_field(
+            name="Panel Embed Title",
+            value=(self.config.get("panel_embed_title") or "Hiring Request Menu")[:256],
             inline=False,
         )
         embed.add_field(

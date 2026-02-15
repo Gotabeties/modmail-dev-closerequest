@@ -38,6 +38,8 @@ Panel setup commands:
 - `hiringconfig usepaneloutput <true|false>`
 - `hiringconfig setembedtitle <title>`
 
+`setembedtitle` updates both the hiring post embed title and the panel/menu embed title.
+
 ## Supabase Setup
 
 Use `hiringconfig setsupabase <url> <key> [table]`.
