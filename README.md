@@ -21,8 +21,8 @@ Sends HEAD, GET, or POST requests to a configurable URL every minute (or custom 
 # Hiring Form
 
 Adds a Hiring Request Menu panel with private controls to add, edit, and delete hiring requests.
-Each user can keep up to 3 open requests at a time, and all submissions validate Discord invite links,
-save to Supabase, and post an embed to a configured channel.
+The menu shows your current open count (example: `0/3`). Each user can keep up to 3 open requests at a time.
+All submissions validate Discord invite links, save to Supabase, and post an embed to a configured channel.
 
 ```?plugin add Gotabeties/modmail-dev-closerequest/hiring@master```
 ```?hiringconfig```
@@ -33,6 +33,7 @@ Panel setup commands:
 - `hiringconfig setpanelmessage <message>`
 - `hiringconfig sendpanel`
 - `hiringconfig setoutputchannel <#channel>`
+- `hiringconfig usepaneloutput <true|false>`
 
 ## Supabase Setup
 
