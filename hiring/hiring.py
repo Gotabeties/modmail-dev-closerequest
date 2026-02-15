@@ -37,7 +37,7 @@ class HiringSubmissionModal(discord.ui.Modal, title="Hiring Submission"):
         self,
         cog: "Hiring",
         mode: str = "create",
-        request_id: Optional[int] = None,
+        request_id: Optional[str] = None,
         initial_data: Optional[Dict] = None,
     ):
         super().__init__()
@@ -142,6 +142,8 @@ class HiringSubmissionModal(discord.ui.Modal, title="Hiring Submission"):
                     ephemeral=True,
                 )
 
+            request_id = str(request_id) if request_id is not None else None
+
             ok, result = await self.cog.post_or_repost_hiring_request(
                 guild=guild,
                 user=interaction.user,
@@ -223,7 +225,7 @@ class HiringEditRequestSelect(discord.ui.Select):
                 HiringSubmissionModal(
                     cog=self.cog,
                     mode="edit",
-                    request_id=int(selected_id),
+                    request_id=selected_id,
                     initial_data=request,
                 )
             )
@@ -265,14 +267,14 @@ class HiringDeleteRequestSelect(discord.ui.Select):
                 return await interaction.followup.send("❌ This can only be used in a server.", ephemeral=True)
 
             ok, result = await self.cog.delete_request(
-                request_id=int(selected_id),
+                request_id=selected_id,
                 guild_id=str(guild.id),
                 user_id=str(interaction.user.id),
             )
             if not ok:
                 return await interaction.followup.send(f"❌ Could not delete request: {result}", ephemeral=True)
 
-            await self.cog.remove_request_message(request_id=int(selected_id), guild=guild)
+            await self.cog.remove_request_message(request_id=selected_id, guild=guild)
             await interaction.followup.send("✅ Hiring request deleted.", ephemeral=True)
         except Exception as exc:
             await self.cog.send_interaction_debug(
@@ -535,7 +537,7 @@ class Hiring(commands.Cog):
         embed.add_field(name="Discord Server Link", value=request_data["discord_server_link"], inline=False)
         return embed
 
-    async def remove_request_message(self, request_id: int, guild: discord.Guild):
+    async def remove_request_message(self, request_id: str, guild: discord.Guild):
         mapped = self.request_message_map.get(str(request_id))
         if not mapped:
             return
@@ -555,7 +557,7 @@ class Hiring(commands.Cog):
         self,
         guild: discord.Guild,
         user: discord.abc.User,
-        request_id: Optional[int],
+        request_id: Optional[str],
         request_data: Dict,
     ):
         channel = self._get_output_channel(guild)
@@ -654,7 +656,7 @@ class Hiring(commands.Cog):
             return self.max_open_requests
         return len(result)
 
-    async def update_request(self, request_id: int, guild_id: str, user_id: str, payload: dict):
+    async def update_request(self, request_id: str, guild_id: str, user_id: str, payload: dict):
         endpoint = self._supabase_endpoint()
         headers = self._supabase_headers(prefer="return=minimal")
         params = {
@@ -674,7 +676,7 @@ class Hiring(commands.Cog):
         except Exception as exc:
             return False, str(exc)
 
-    async def delete_request(self, request_id: int, guild_id: str, user_id: str):
+    async def delete_request(self, request_id: str, guild_id: str, user_id: str):
         endpoint = self._supabase_endpoint()
         headers = self._supabase_headers(prefer="return=minimal")
         params = {
