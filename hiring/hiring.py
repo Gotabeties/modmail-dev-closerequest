@@ -132,14 +132,35 @@ class HiringSubmissionModal(discord.ui.Modal, title="Hiring Submission"):
         await interaction.response.send_message("✅ Hiring submission sent successfully.", ephemeral=True)
 
 
+class HiringPanelView(discord.ui.View):
+    def __init__(self, cog: "Hiring"):
+        super().__init__(timeout=None)
+        self.cog = cog
+
+    @discord.ui.button(
+        label="Apply for Hiring",
+        style=discord.ButtonStyle.primary,
+        custom_id="hiring:open_form",
+    )
+    async def open_hiring_form(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.guild is None:
+            return await interaction.response.send_message(
+                "❌ This button can only be used in a server.",
+                ephemeral=True,
+            )
+
+        await interaction.response.send_modal(HiringSubmissionModal(self.cog))
+
+
 class Hiring(commands.Cog):
-    """Collect hiring submissions via slash command and save to Supabase."""
+    """Collect hiring submissions via a button panel and save to Supabase."""
 
     def __init__(self, bot):
         self.bot = bot
         self.db = bot.api.get_plugin_partition(self)
         self.default_config = {
-            "command_channel_id": None,
+            "panel_channel_id": None,
+            "panel_message": "Click the button below to submit a hiring post.",
             "output_channel_id": None,
             "supabase_url": None,
             "supabase_key": None,
@@ -158,6 +179,8 @@ class Hiring(commands.Cog):
             for key in missing:
                 self.config[key] = self.default_config[key]
             await self.update_config()
+
+        self.bot.add_view(HiringPanelView(self))
 
     async def update_config(self):
         await self.db.find_one_and_update(
@@ -197,27 +220,6 @@ class Hiring(commands.Cog):
         except Exception as exc:
             return False, str(exc)
 
-    @commands.hybrid_command(name="hiring", with_app_command=True)
-    async def hiring(self, ctx):
-        """Open the hiring form."""
-        if ctx.guild is None:
-            return await ctx.send("❌ This command can only be used in a server.", ephemeral=True)
-
-        command_channel_id = self.config.get("command_channel_id")
-        if command_channel_id and ctx.channel.id != command_channel_id:
-            channel = ctx.guild.get_channel(command_channel_id)
-            if channel:
-                return await ctx.send(
-                    f"❌ You can only use this command in {channel.mention}.",
-                    ephemeral=True,
-                )
-            return await ctx.send("❌ The configured command channel no longer exists.", ephemeral=True)
-
-        if ctx.interaction is None:
-            return await ctx.send("❌ Please use the slash command `/hiring` to open the form.")
-
-        await ctx.interaction.response.send_modal(HiringSubmissionModal(self))
-
     @checks.has_permissions(PermissionLevel.ADMINISTRATOR)
     @commands.group(invoke_without_command=True)
     async def hiringconfig(self, ctx):
@@ -225,12 +227,47 @@ class Hiring(commands.Cog):
         await ctx.send_help(ctx.command)
 
     @checks.has_permissions(PermissionLevel.ADMINISTRATOR)
-    @hiringconfig.command(name="setcommandchannel")
-    async def hiringconfig_setcommandchannel(self, ctx, channel: discord.TextChannel):
-        """Set the channel where /hiring can be used."""
-        self.config["command_channel_id"] = channel.id
+    @hiringconfig.command(name="setpanelchannel")
+    async def hiringconfig_setpanelchannel(self, ctx, channel: discord.TextChannel):
+        """Set the channel where the hiring button panel should be posted."""
+        self.config["panel_channel_id"] = channel.id
         await self.update_config()
-        await ctx.send(f"✅ /hiring can now be used in {channel.mention}")
+        await ctx.send(f"✅ Hiring panel channel set to {channel.mention}")
+
+    @checks.has_permissions(PermissionLevel.ADMINISTRATOR)
+    @hiringconfig.command(name="setpanelmessage")
+    async def hiringconfig_setpanelmessage(self, ctx, *, message: str):
+        """Set the message content used for the hiring panel."""
+        self.config["panel_message"] = message
+        await self.update_config()
+        await ctx.send("✅ Hiring panel message updated.")
+
+    @checks.has_permissions(PermissionLevel.ADMINISTRATOR)
+    @hiringconfig.command(name="sendpanel")
+    async def hiringconfig_sendpanel(self, ctx):
+        """Send the hiring panel message with button to the configured channel."""
+        if ctx.guild is None:
+            return await ctx.send("❌ This command can only be used in a server.")
+
+        panel_channel_id = self.config.get("panel_channel_id")
+        if not panel_channel_id:
+            return await ctx.send("❌ Panel channel not set. Use `hiringconfig setpanelchannel <#channel>`." )
+
+        panel_channel = ctx.guild.get_channel(panel_channel_id)
+        if panel_channel is None:
+            return await ctx.send("❌ The configured panel channel no longer exists.")
+
+        panel_message = self.config.get("panel_message") or "Click the button below to submit a hiring post."
+        view = HiringPanelView(self)
+
+        try:
+            await panel_channel.send(panel_message, view=view)
+        except discord.Forbidden:
+            return await ctx.send("❌ I don't have permission to send messages in the configured panel channel.")
+        except Exception as exc:
+            return await ctx.send(f"❌ Failed to send hiring panel: {exc}")
+
+        await ctx.send(f"✅ Hiring panel sent to {panel_channel.mention}")
 
     @checks.has_permissions(PermissionLevel.ADMINISTRATOR)
     @hiringconfig.command(name="setoutputchannel")
@@ -266,7 +303,7 @@ class Hiring(commands.Cog):
     @hiringconfig.command(name="view")
     async def hiringconfig_view(self, ctx):
         """View current hiring configuration."""
-        command_channel = self.bot.get_channel(self.config["command_channel_id"]) if self.config.get("command_channel_id") else None
+        panel_channel = self.bot.get_channel(self.config["panel_channel_id"]) if self.config.get("panel_channel_id") else None
         output_channel = self.bot.get_channel(self.config["output_channel_id"]) if self.config.get("output_channel_id") else None
         key = self.config.get("supabase_key")
         masked_key = "Configured" if key else "Not set"
@@ -276,8 +313,13 @@ class Hiring(commands.Cog):
             color=self.bot.main_color,
         )
         embed.add_field(
-            name="Command Channel",
-            value=command_channel.mention if command_channel else "Not set",
+            name="Panel Channel",
+            value=panel_channel.mention if panel_channel else "Not set",
+            inline=False,
+        )
+        embed.add_field(
+            name="Panel Message",
+            value=(self.config.get("panel_message") or "Not set")[:1024],
             inline=False,
         )
         embed.add_field(
