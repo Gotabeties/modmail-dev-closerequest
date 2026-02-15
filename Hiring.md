@@ -6,6 +6,12 @@ If `hiringconfig usepaneloutput true` is enabled, the panel embed is automatical
 Each posted hiring embed includes the request ID/UUID in the footer.
 Hiring listing embeds always use the title `New Hiring Post`.
 
+Auto-delete behavior:
+
+- Requests auto-delete after configured age (default: 14 days).
+- On auto-delete, the request owner is DM'd that their post expired.
+- If an admin deletes a request, the owner is DM'd with the admin-provided reason.
+
 Panel setup commands:
 
 - `hiringconfig setpanelchannel <#channel>`
@@ -13,11 +19,13 @@ Panel setup commands:
 - `hiringconfig sendpanel`
 - `hiringconfig setoutputchannel <#channel>`
 - `hiringconfig usepaneloutput <true|false>`
-- `hiring setembedtitle <title>`
+- `hiringconfig setembedtitle <title>`
 - `hiring requestinfo <id_or_uuid>`
-- `hiring deleterequest <id_or_uuid>`
+- `hiring deleterequest <id_or_uuid> <reason>`
+- `hiringconfig setautodelete <days>`
+- `hiringconfig autodelete <true|false>`
 
-`hiring setembedtitle` updates the panel/menu embed title.
+`hiringconfig setembedtitle` updates the panel/menu embed title.
 
 ## Supabase Setup
 

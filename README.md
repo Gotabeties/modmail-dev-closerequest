@@ -24,4 +24,3 @@ Adds a Hiring Request Menu panel with private controls to add, edit, and delete 
 
 ```?plugin add Gotabeties/modmail-dev-closerequest/hiring@master```
 ```?hiringconfig```
-

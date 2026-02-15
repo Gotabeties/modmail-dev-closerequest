@@ -1,12 +1,12 @@
 import re
 import traceback
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional
 from urllib.parse import urlparse
 
 import aiohttp
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 
 from core import checks
 from core.models import PermissionLevel
@@ -429,6 +429,8 @@ class Hiring(commands.Cog):
             "panel_embed_title": "Hiring Request Menu",
             "output_channel_id": None,
             "use_panel_channel_for_output": False,
+            "auto_delete_enabled": True,
+            "auto_delete_days": 14,
             "supabase_url": None,
             "supabase_key": None,
             "supabase_table": "hiring_submissions",
@@ -452,6 +454,12 @@ class Hiring(commands.Cog):
         self.request_message_map = (message_map_doc or {}).get("map", {})
 
         self.bot.add_view(HiringPanelView(self))
+        if not self.auto_delete_loop.is_running():
+            self.auto_delete_loop.start()
+
+    def cog_unload(self):
+        if self.auto_delete_loop.is_running():
+            self.auto_delete_loop.cancel()
 
     async def update_config(self):
         await self.db.find_one_and_update(
@@ -556,12 +564,17 @@ class Hiring(commands.Cog):
         embed.set_footer(text=f"Post ID: {post_id_text}")
         return embed
 
-    async def remove_request_message(self, request_id: str, guild: discord.Guild):
+    async def remove_request_message(self, request_id: str, guild: Optional[discord.Guild] = None):
         mapped = self.request_message_map.get(str(request_id))
         if not mapped:
             return
 
-        channel = guild.get_channel(mapped.get("channel_id"))
+        channel = None
+        if guild is not None:
+            channel = guild.get_channel(mapped.get("channel_id"))
+        if channel is None:
+            channel = self.bot.get_channel(mapped.get("channel_id"))
+
         if channel is not None:
             try:
                 message = await channel.fetch_message(mapped.get("message_id"))
@@ -739,6 +752,30 @@ class Hiring(commands.Cog):
         except Exception as exc:
             return False, str(exc)
 
+    async def list_expired_requests(self, cutoff: datetime):
+        endpoint = self._supabase_endpoint()
+        headers = self._supabase_headers()
+        params = {
+            "select": "id,guild_id,user_id,username,submitted_at",
+            "submitted_at": f"lt.{cutoff.isoformat()}",
+            "order": "submitted_at.asc",
+            "limit": "200",
+        }
+
+        try:
+            timeout = aiohttp.ClientTimeout(total=20)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(endpoint, params=params, headers=headers) as response:
+                    if response.status in (200, 206):
+                        data = await response.json(content_type=None)
+                        if isinstance(data, list):
+                            return True, data
+                        return True, []
+                    body = await response.text()
+                    return False, f"HTTP {response.status}: {body[:300]}"
+        except Exception as exc:
+            return False, str(exc)
+
     async def delete_request_by_id_admin(self, request_id: str, guild_id: str):
         endpoint = self._supabase_endpoint()
         headers = self._supabase_headers(prefer="return=minimal")
@@ -757,6 +794,74 @@ class Hiring(commands.Cog):
                     return False, f"HTTP {response.status}: {body[:300]}"
         except Exception as exc:
             return False, str(exc)
+
+    async def notify_request_deleted(
+        self,
+        *,
+        user_id: str,
+        request_id: str,
+        reason: str,
+        deleted_by: str,
+    ):
+        if not user_id or not user_id.isdigit():
+            return
+
+        try:
+            user_obj = self.bot.get_user(int(user_id)) or await self.bot.fetch_user(int(user_id))
+        except Exception:
+            return
+
+        try:
+            await user_obj.send(
+                f"Your hiring request has been deleted.\n"
+                f"Post ID: `{request_id}`\n"
+                f"Deleted by: {deleted_by}\n"
+                f"Reason: {reason}"
+            )
+        except Exception:
+            pass
+
+    @tasks.loop(minutes=30)
+    async def auto_delete_loop(self):
+        if not self.config:
+            return
+        if not self.config.get("auto_delete_enabled", True):
+            return
+        if not self.supabase_ready():
+            return
+
+        days = int(self.config.get("auto_delete_days") or 14)
+        if days <= 0:
+            return
+
+        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+        ok, rows = await self.list_expired_requests(cutoff=cutoff)
+        if not ok:
+            return
+
+        for row in rows:
+            request_id = str(row.get("id") or "").strip()
+            guild_id = str(row.get("guild_id") or "").strip()
+            user_id = str(row.get("user_id") or "").strip()
+            if not request_id or not guild_id:
+                continue
+
+            deleted, _ = await self.delete_request_by_id_admin(request_id=request_id, guild_id=guild_id)
+            if not deleted:
+                continue
+
+            guild_obj = self.bot.get_guild(int(guild_id)) if guild_id.isdigit() else None
+            await self.remove_request_message(request_id=request_id, guild=guild_obj)
+            await self.notify_request_deleted(
+                user_id=user_id,
+                request_id=request_id,
+                deleted_by="Automatic Expiry",
+                reason=f"Your request expired after {days} day(s).",
+            )
+
+    @auto_delete_loop.before_loop
+    async def before_auto_delete_loop(self):
+        await self.bot.wait_until_ready()
 
     @checks.has_permissions(PermissionLevel.ADMINISTRATOR)
     @commands.group(invoke_without_command=True)
@@ -888,8 +993,8 @@ class Hiring(commands.Cog):
 
     @checks.has_permissions(PermissionLevel.ADMINISTRATOR)
     @hiring_group.command(name="deleterequest")
-    async def hiringconfig_deleterequest(self, ctx, *, request_id: str):
-        """Delete one hiring request by id/uuid."""
+    async def hiringconfig_deleterequest(self, ctx, request_id: str, *, reason: str):
+        """Delete one hiring request by id/uuid with reason."""
         if ctx.guild is None:
             return await ctx.send("❌ This command can only be used in a server.")
 
@@ -897,12 +1002,47 @@ class Hiring(commands.Cog):
         if not rid:
             return await ctx.send("❌ Please provide a request ID.")
 
+        reason = reason.strip()
+        if not reason:
+            return await ctx.send("❌ Please provide a reason for deletion.")
+
+        ok_info, row = await self.get_request_by_id(request_id=rid, guild_id=str(ctx.guild.id))
+        if not ok_info:
+            return await ctx.send(f"❌ Could not fetch request before deletion: {row}")
+
         ok, result = await self.delete_request_by_id_admin(request_id=rid, guild_id=str(ctx.guild.id))
         if not ok:
             return await ctx.send(f"❌ Could not delete request: {result}")
 
         await self.remove_request_message(request_id=rid, guild=ctx.guild)
+        await self.notify_request_deleted(
+            user_id=str(row.get("user_id") or ""),
+            request_id=rid,
+            deleted_by=str(ctx.author),
+            reason=reason,
+        )
         await ctx.send(f"✅ Deleted request `{rid}`")
+
+    @checks.has_permissions(PermissionLevel.ADMINISTRATOR)
+    @hiringconfig.command(name="setautodelete")
+    async def hiringconfig_setautodelete(self, ctx, days: int):
+        """Set auto-delete age in days for hiring requests."""
+        if days < 1 or days > 365:
+            return await ctx.send("❌ Days must be between 1 and 365.")
+
+        self.config["auto_delete_days"] = days
+        await self.update_config()
+        await ctx.send(f"✅ Auto-delete age set to {days} day(s).")
+
+    @checks.has_permissions(PermissionLevel.ADMINISTRATOR)
+    @hiringconfig.command(name="autodelete")
+    async def hiringconfig_autodelete(self, ctx, enabled: bool):
+        """Enable or disable automatic deletion of old hiring requests."""
+        self.config["auto_delete_enabled"] = enabled
+        await self.update_config()
+        await ctx.send(
+            "✅ Auto-delete is now enabled." if enabled else "✅ Auto-delete is now disabled."
+        )
 
     @checks.has_permissions(PermissionLevel.ADMINISTRATOR)
     @hiringconfig.command(name="view")
@@ -956,6 +1096,16 @@ class Hiring(commands.Cog):
         embed.add_field(
             name="Supabase Table",
             value=self.config.get("supabase_table") or "Not set",
+            inline=True,
+        )
+        embed.add_field(
+            name="Auto Delete",
+            value="Enabled" if self.config.get("auto_delete_enabled", True) else "Disabled",
+            inline=True,
+        )
+        embed.add_field(
+            name="Auto Delete Days",
+            value=str(self.config.get("auto_delete_days") or 14),
             inline=True,
         )
 
