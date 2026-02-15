@@ -552,10 +552,8 @@ class Hiring(commands.Cog):
         embed.add_field(name="Position", value=request_data["position"], inline=False)
         embed.add_field(name="Description", value=request_data["description"], inline=False)
         embed.add_field(name="Discord Server Link", value=request_data["discord_server_link"], inline=False)
-        posted_by = str(request_data.get("username") or str(user))
-        submitted_at = str(request_data.get("submitted_at") or "Unknown")
         post_id_text = str(request_id) if request_id is not None else "Unknown"
-        embed.set_footer(text=f"Post ID: {post_id_text} · Posted by: {posted_by} · Submitted: {submitted_at}")
+        embed.set_footer(text=f"Post ID: {post_id_text}")
         return embed
 
     async def remove_request_message(self, request_id: str, guild: discord.Guild):
