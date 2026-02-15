@@ -377,6 +377,7 @@ class Hiring(commands.Cog):
         self.default_config = {
             "panel_channel_id": None,
             "panel_message": "Click the button below to submit a hiring post.",
+            "panel_message_id": None,
             "output_channel_id": None,
             "use_panel_channel_for_output": False,
             "supabase_url": None,
@@ -416,6 +417,42 @@ class Hiring(commands.Cog):
             {"$set": {"map": self.request_message_map}},
             upsert=True,
         )
+
+    async def _send_or_resend_panel_message(self, guild: discord.Guild):
+        panel_channel_id = self.config.get("panel_channel_id")
+        if not panel_channel_id:
+            return False, "Panel channel not set. Use `hiringconfig setpanelchannel <#channel>`."
+
+        panel_channel = guild.get_channel(panel_channel_id)
+        if panel_channel is None:
+            return False, "The configured panel channel no longer exists."
+
+        old_message_id = self.config.get("panel_message_id")
+        if old_message_id:
+            try:
+                old_message = await panel_channel.fetch_message(old_message_id)
+                await old_message.delete()
+            except Exception:
+                pass
+
+        panel_message = self.config.get("panel_message") or "Click the button below to submit a hiring post."
+        embed = discord.Embed(
+            title="Hiring Request Menu",
+            description=panel_message,
+            color=self.bot.main_color,
+        )
+        view = HiringPanelView(self)
+
+        try:
+            sent_message = await panel_channel.send(embed=embed, view=view)
+        except discord.Forbidden:
+            return False, "I don't have permission to send messages in the configured panel channel."
+        except Exception as exc:
+            return False, str(exc)
+
+        self.config["panel_message_id"] = sent_message.id
+        await self.update_config()
+        return True, None
 
     def supabase_ready(self) -> bool:
         return bool(
@@ -496,6 +533,9 @@ class Hiring(commands.Cog):
             }
             await self.update_request_message_map()
 
+        if self.config.get("use_panel_channel_for_output"):
+            await self._send_or_resend_panel_message(guild)
+
         return True, None
 
     def _supabase_endpoint(self) -> str:
@@ -528,6 +568,11 @@ class Hiring(commands.Cog):
                             return True, data[0].get("id")
                         return True, None
                     body = await response.text()
+                    if response.status == 409 and "23505" in body and "guild_id" in body:
+                        return (
+                            False,
+                            "Table schema issue: `guild_id` is unique/primary. Create an `id` primary key and make `guild_id` a normal text column.",
+                        )
                     return False, f"HTTP {response.status}: {body[:300]}"
         except Exception as exc:
             return False, str(exc)
@@ -631,23 +676,13 @@ class Hiring(commands.Cog):
         if ctx.guild is None:
             return await ctx.send("❌ This command can only be used in a server.")
 
-        panel_channel_id = self.config.get("panel_channel_id")
-        if not panel_channel_id:
-            return await ctx.send("❌ Panel channel not set. Use `hiringconfig setpanelchannel <#channel>`." )
+        ok, result = await self._send_or_resend_panel_message(ctx.guild)
+        if not ok:
+            return await ctx.send(f"❌ Failed to send hiring panel: {result}")
 
-        panel_channel = ctx.guild.get_channel(panel_channel_id)
+        panel_channel = ctx.guild.get_channel(self.config.get("panel_channel_id"))
         if panel_channel is None:
-            return await ctx.send("❌ The configured panel channel no longer exists.")
-
-        panel_message = self.config.get("panel_message") or "Click the button below to submit a hiring post."
-        view = HiringPanelView(self)
-
-        try:
-            await panel_channel.send(panel_message, view=view)
-        except discord.Forbidden:
-            return await ctx.send("❌ I don't have permission to send messages in the configured panel channel.")
-        except Exception as exc:
-            return await ctx.send(f"❌ Failed to send hiring panel: {exc}")
+            return await ctx.send("✅ Hiring panel sent.")
 
         await ctx.send(f"✅ Hiring panel sent to {panel_channel.mention}")
 
