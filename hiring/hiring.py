@@ -526,7 +526,7 @@ class Hiring(commands.Cog):
 
         return None
 
-    def _build_hiring_embed(self, user: discord.abc.User, request_data: Dict) -> discord.Embed:
+    def _build_hiring_embed(self, user: discord.abc.User, request_data: Dict, request_id: Optional[str] = None) -> discord.Embed:
         embed = discord.Embed(
             title=self.config.get("hiring_embed_title") or "Now Hiring",
             color=discord.Color.blue(),
@@ -537,6 +537,8 @@ class Hiring(commands.Cog):
         embed.add_field(name="Position", value=request_data["position"], inline=False)
         embed.add_field(name="Description", value=request_data["description"], inline=False)
         embed.add_field(name="Discord Server Link", value=request_data["discord_server_link"], inline=False)
+        if request_id:
+            embed.set_footer(text=f"Request ID: {request_id}")
         return embed
 
     async def remove_request_message(self, request_id: str, guild: discord.Guild):
@@ -569,7 +571,7 @@ class Hiring(commands.Cog):
         if request_id is not None:
             await self.remove_request_message(request_id=request_id, guild=guild)
 
-        embed = self._build_hiring_embed(user=user, request_data=request_data)
+        embed = self._build_hiring_embed(user=user, request_data=request_data, request_id=request_id)
         try:
             message = await channel.send(embed=embed)
         except discord.Forbidden:
@@ -698,10 +700,59 @@ class Hiring(commands.Cog):
         except Exception as exc:
             return False, str(exc)
 
+    async def get_request_by_id(self, request_id: str, guild_id: str):
+        endpoint = self._supabase_endpoint()
+        headers = self._supabase_headers()
+        params = {
+            "select": "*",
+            "id": f"eq.{request_id}",
+            "guild_id": f"eq.{guild_id}",
+            "limit": "1",
+        }
+
+        try:
+            timeout = aiohttp.ClientTimeout(total=15)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(endpoint, params=params, headers=headers) as response:
+                    if response.status in (200, 206):
+                        data = await response.json(content_type=None)
+                        if isinstance(data, list) and data:
+                            return True, data[0]
+                        return False, "No request found for that ID in this server."
+                    body = await response.text()
+                    return False, f"HTTP {response.status}: {body[:300]}"
+        except Exception as exc:
+            return False, str(exc)
+
+    async def delete_request_by_id_admin(self, request_id: str, guild_id: str):
+        endpoint = self._supabase_endpoint()
+        headers = self._supabase_headers(prefer="return=minimal")
+        params = {
+            "id": f"eq.{request_id}",
+            "guild_id": f"eq.{guild_id}",
+        }
+
+        try:
+            timeout = aiohttp.ClientTimeout(total=15)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.delete(endpoint, params=params, headers=headers) as response:
+                    if response.status in (200, 204):
+                        return True, None
+                    body = await response.text()
+                    return False, f"HTTP {response.status}: {body[:300]}"
+        except Exception as exc:
+            return False, str(exc)
+
     @checks.has_permissions(PermissionLevel.ADMINISTRATOR)
     @commands.group(invoke_without_command=True)
     async def hiringconfig(self, ctx):
         """Configure the hiring plugin."""
+        await ctx.send_help(ctx.command)
+
+    @checks.has_permissions(PermissionLevel.ADMINISTRATOR)
+    @commands.group(name="hiring", invoke_without_command=True)
+    async def hiring_group(self, ctx):
+        """Hiring admin utilities."""
         await ctx.send_help(ctx.command)
 
     @checks.has_permissions(PermissionLevel.ADMINISTRATOR)
@@ -746,7 +797,7 @@ class Hiring(commands.Cog):
         await ctx.send(f"✅ Hiring submissions will be posted in {channel.mention}")
 
     @checks.has_permissions(PermissionLevel.ADMINISTRATOR)
-    @hiringconfig.command(name="setembedtitle")
+    @hiring_group.command(name="setembedtitle")
     async def hiringconfig_setembedtitle(self, ctx, *, title: str):
         """Set the title used for hiring and panel/menu embeds."""
         title = title.strip()
@@ -791,6 +842,53 @@ class Hiring(commands.Cog):
         self.config["supabase_table"] = table.strip()
         await self.update_config()
         await ctx.send(f"✅ Supabase table set to `{table.strip()}`")
+
+    @checks.has_permissions(PermissionLevel.ADMINISTRATOR)
+    @hiring_group.command(name="requestinfo")
+    async def hiringconfig_requestinfo(self, ctx, *, request_id: str):
+        """View all database fields for one hiring request by id/uuid."""
+        if ctx.guild is None:
+            return await ctx.send("❌ This command can only be used in a server.")
+
+        rid = request_id.strip()
+        if not rid:
+            return await ctx.send("❌ Please provide a request ID.")
+
+        ok, result = await self.get_request_by_id(request_id=rid, guild_id=str(ctx.guild.id))
+        if not ok:
+            return await ctx.send(f"❌ Could not fetch request: {result}")
+
+        embed = discord.Embed(
+            title="Hiring Request Info",
+            description=f"Request ID: {rid}",
+            color=self.bot.main_color,
+        )
+
+        for key, value in result.items():
+            field_value = "null" if value is None else str(value)
+            if len(field_value) > 1024:
+                field_value = field_value[:1021] + "..."
+            embed.add_field(name=str(key)[:256], value=field_value, inline=False)
+
+        await ctx.send(embed=embed)
+
+    @checks.has_permissions(PermissionLevel.ADMINISTRATOR)
+    @hiring_group.command(name="deleterequest")
+    async def hiringconfig_deleterequest(self, ctx, *, request_id: str):
+        """Delete one hiring request by id/uuid."""
+        if ctx.guild is None:
+            return await ctx.send("❌ This command can only be used in a server.")
+
+        rid = request_id.strip()
+        if not rid:
+            return await ctx.send("❌ Please provide a request ID.")
+
+        ok, result = await self.delete_request_by_id_admin(request_id=rid, guild_id=str(ctx.guild.id))
+        if not ok:
+            return await ctx.send(f"❌ Could not delete request: {result}")
+
+        await self.remove_request_message(request_id=rid, guild=ctx.guild)
+        await ctx.send(f"✅ Deleted request `{rid}`")
 
     @checks.has_permissions(PermissionLevel.ADMINISTRATOR)
     @hiringconfig.command(name="view")
