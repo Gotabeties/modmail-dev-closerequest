@@ -430,9 +430,7 @@ class HiringPanelView(discord.ui.View):
 
         await interaction.response.defer(ephemeral=True)
         count = await self.cog.get_open_request_count(str(interaction.guild.id), str(interaction.user.id))
-        menu_title = self.cog._normalize_embed_title_text(
-            self.cog.config.get("panel_embed_title") or "Hiring Request Menu"
-        )[:220]
+        menu_title = (self.cog.config.get("panel_embed_title") or "Hiring Request Menu")[:220]
         menu_embed = discord.Embed(
             title=f"{menu_title} ({count}/{self.cog.max_open_requests})",
             description="Use the buttons below to add, edit, or delete your hiring requests.",
@@ -516,10 +514,6 @@ class Hiring(commands.Cog):
     def _post_color(self):
         return getattr(self.bot, "recipient_color", getattr(self.bot, "main_color", discord.Color.blurple()))
 
-    def _normalize_embed_title_text(self, title: str) -> str:
-        value = str(title or "")
-        return value.replace("\ufe0f", "")
-
     def _apply_configured_embed_image(self, embed: discord.Embed) -> discord.Embed:
         image_url = str(self.config.get("embed_image_url") or "").strip()
         if image_url:
@@ -599,9 +593,7 @@ class Hiring(commands.Cog):
 
         panel_message = self.config.get("panel_message") or "Click the button below to submit a hiring post."
         embed = discord.Embed(
-            title=self._normalize_embed_title_text(
-                (self.config.get("panel_embed_title") or "Hiring Request Menu")
-            )[:256],
+            title=(self.config.get("panel_embed_title") or "Hiring Request Menu")[:256],
             description=panel_message,
             color=self._panel_color(),
         )
@@ -1236,7 +1228,7 @@ class Hiring(commands.Cog):
     @hiringconfig.command(name="setembedtitle")
     async def hiringconfig_setembedtitle(self, ctx, *, title: str):
         """Set the title used for panel/menu embeds."""
-        title = self._normalize_embed_title_text(title).strip()
+        title = title.strip()
         if not title:
             return await ctx.send("❌ Embed title cannot be empty.")
 
