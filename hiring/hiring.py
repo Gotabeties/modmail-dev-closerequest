@@ -1,7 +1,7 @@
 import re
 import traceback
 from datetime import datetime, timedelta, timezone
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
 import aiohttp
@@ -117,6 +117,20 @@ class HiringSubmissionModal(discord.ui.Modal, title="Hiring Submission"):
             "description": str(self.description.value).strip(),
             "discord_server_link": link_value,
         }
+
+        moderation_result = await self.cog.validate_hiring_content(base_payload)
+        if moderation_result:
+            if moderation_result.get("type") == "api_error":
+                return await interaction.followup.send(
+                    "❌ Content filter is temporarily unavailable. Please try again in a moment.",
+                    ephemeral=True,
+                )
+
+            field_name = moderation_result["field"]
+            return await interaction.followup.send(
+                f"❌ Your submission was blocked by the content filter. Please remove inappropriate language from **{field_name}** and try again.",
+                ephemeral=True,
+            )
 
         if self.mode == "create":
             request_count = await self.cog.get_open_request_count(str(guild.id), str(interaction.user.id))
@@ -429,6 +443,8 @@ class Hiring(commands.Cog):
             "panel_embed_title": "Hiring Request Menu",
             "output_channel_id": None,
             "use_panel_channel_for_output": False,
+            "content_filter_enabled": True,
+            "profanity_api_url": "https://vector.profanity.dev",
             "auto_delete_enabled": True,
             "auto_delete_days": 14,
             "supabase_url": None,
@@ -546,6 +562,87 @@ class Hiring(commands.Cog):
         output_channel = guild.get_channel(output_channel_id) if output_channel_id else None
         if isinstance(output_channel, discord.TextChannel):
             return output_channel
+
+        return None
+
+    async def _check_message_with_profanity_api(self, message: str) -> Tuple[bool, Optional[bool], Optional[str]]:
+        api_url = str(self.config.get("profanity_api_url") or "https://vector.profanity.dev").strip()
+        if not api_url:
+            return False, None, "Profanity API URL is not configured."
+
+        headers = {"Content-Type": "application/json"}
+        body = {"message": message}
+
+        try:
+            timeout = aiohttp.ClientTimeout(total=10)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.post(api_url, json=body, headers=headers) as response:
+                    if response.status != 200:
+                        body_text = await response.text()
+                        return False, None, f"HTTP {response.status}: {body_text[:200]}"
+
+                    try:
+                        data: Any = await response.json(content_type=None)
+                    except Exception:
+                        raw = await response.text()
+                        return False, None, f"Invalid JSON response: {raw[:200]}"
+        except Exception as exc:
+            return False, None, str(exc)
+
+        def find_boolean_flag(obj: Any) -> Optional[bool]:
+            if isinstance(obj, dict):
+                for key in (
+                    "isProfanity",
+                    "is_profanity",
+                    "profanity",
+                    "isProfane",
+                    "is_profane",
+                    "containsProfanity",
+                    "contains_profanity",
+                    "flagged",
+                ):
+                    value = obj.get(key)
+                    if isinstance(value, bool):
+                        return value
+
+                for key in ("result", "data"):
+                    nested = obj.get(key)
+                    found = find_boolean_flag(nested)
+                    if isinstance(found, bool):
+                        return found
+
+                matches = obj.get("matches")
+                if isinstance(matches, list):
+                    return len(matches) > 0
+
+            return None
+
+        profanity_detected = find_boolean_flag(data)
+        if profanity_detected is None:
+            return False, None, "Unexpected profanity API response format."
+
+        return True, profanity_detected, None
+
+    async def validate_hiring_content(self, payload: Dict) -> Optional[Dict[str, str]]:
+        if not self.config.get("content_filter_enabled", True):
+            return None
+
+        fields_to_check = {
+            "Company Name": str(payload.get("company_name") or ""),
+            "Position": str(payload.get("position") or ""),
+            "Description": str(payload.get("description") or ""),
+        }
+
+        for field_name, value in fields_to_check.items():
+            if not value.strip():
+                continue
+
+            ok, profanity_detected, error = await self._check_message_with_profanity_api(value)
+            if not ok:
+                return {"type": "api_error", "error": str(error or "Unknown profanity API error")}
+
+            if profanity_detected:
+                return {"type": "blocked", "field": field_name}
 
         return None
 
@@ -963,6 +1060,30 @@ class Hiring(commands.Cog):
         await ctx.send(f"✅ Supabase table set to `{table.strip()}`")
 
     @checks.has_permissions(PermissionLevel.ADMINISTRATOR)
+    @hiringconfig.command(name="filter")
+    async def hiringconfig_filter(self, ctx, enabled: bool):
+        """Enable or disable the hiring content filter."""
+        self.config["content_filter_enabled"] = enabled
+        await self.update_config()
+        await ctx.send(
+            "✅ Hiring content filter is now enabled."
+            if enabled
+            else "✅ Hiring content filter is now disabled."
+        )
+
+    @checks.has_permissions(PermissionLevel.ADMINISTRATOR)
+    @hiringconfig.command(name="setfilterapi")
+    async def hiringconfig_setfilterapi(self, ctx, url: str):
+        """Set the API URL used for hiring profanity filtering."""
+        cleaned = url.strip()
+        if not cleaned.startswith(("https://", "http://")):
+            return await ctx.send("❌ API URL must start with http:// or https://")
+
+        self.config["profanity_api_url"] = cleaned.rstrip("/")
+        await self.update_config()
+        await ctx.send(f"✅ Hiring content filter API URL set to: {self.config['profanity_api_url']}")
+
+    @checks.has_permissions(PermissionLevel.ADMINISTRATOR)
     @hiring_group.command(name="requestinfo")
     async def hiringconfig_requestinfo(self, ctx, *, request_id: str):
         """View all database fields for one hiring request by id/uuid."""
@@ -1075,6 +1196,16 @@ class Hiring(commands.Cog):
         embed.add_field(
             name="Use Panel as Output",
             value="Enabled" if self.config.get("use_panel_channel_for_output") else "Disabled",
+            inline=True,
+        )
+        embed.add_field(
+            name="Content Filter",
+            value="Enabled" if self.config.get("content_filter_enabled", True) else "Disabled",
+            inline=True,
+        )
+        embed.add_field(
+            name="Filter API URL",
+            value=(self.config.get("profanity_api_url") or "https://vector.profanity.dev")[:1024],
             inline=True,
         )
         embed.add_field(name="Hiring Post Title", value="New Hiring Post", inline=False)
