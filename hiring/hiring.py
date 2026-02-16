@@ -509,7 +509,10 @@ class Hiring(commands.Cog):
         )
 
     def _panel_color(self):
-        return getattr(self.bot, "recipient_color", self.bot.main_color)
+        return getattr(self.bot, "main_color", getattr(self.bot, "recipient_color", discord.Color.blurple()))
+
+    def _post_color(self):
+        return getattr(self.bot, "recipient_color", getattr(self.bot, "main_color", discord.Color.blurple()))
 
     def _apply_configured_embed_image(self, embed: discord.Embed) -> discord.Embed:
         image_url = str(self.config.get("embed_image_url") or "").strip()
@@ -760,7 +763,7 @@ class Hiring(commands.Cog):
     ) -> discord.Embed:
         embed = discord.Embed(
             title="New Hiring Post",
-            color=self.bot.main_color,
+            color=self._post_color(),
             timestamp=datetime.now(timezone.utc),
         )
 
@@ -1175,7 +1178,7 @@ class Hiring(commands.Cog):
         embed = discord.Embed(
             title=f"Blacklisted Hiring Users ({len(banned_ids)})",
             description=description,
-            color=self.bot.main_color,
+            color=self._post_color(),
         )
         embed = self._apply_configured_embed_image(embed)
         await ctx.send(embed=embed)
@@ -1327,7 +1330,7 @@ class Hiring(commands.Cog):
         embed = discord.Embed(
             title="Hiring Request Info",
             description=f"Request ID: {rid}",
-            color=self.bot.main_color,
+            color=self._post_color(),
         )
 
         for key, value in result.items():
@@ -1545,7 +1548,7 @@ class Hiring(commands.Cog):
 
         embed = discord.Embed(
             title="Hiring Plugin Configuration",
-            color=self.bot.main_color,
+            color=self._post_color(),
         )
         embed.add_field(
             name="Panel Channel",

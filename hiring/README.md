@@ -5,7 +5,7 @@ All submissions validate Discord invite links, save to Supabase, and post an emb
 If `hiringconfig usepaneloutput true` is enabled, the panel embed is automatically re-sent so it stays at the bottom.
 Each posted hiring embed includes the request ID/UUID in the footer.
 Hiring listing embeds always use the title `New Hiring Post`.
-Hiring post embeds use your bot `main_color`, and panel/menu embeds use `recipient_color`.
+Hiring post embeds use your bot `recipient_color`, and panel/menu embeds use `main_color`.
 All hiring embeds can optionally include a configured image at the bottom.
 
 Panel setup commands:
