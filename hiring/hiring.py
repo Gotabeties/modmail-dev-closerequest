@@ -362,8 +362,9 @@ class HiringRequestMenuView(discord.ui.View):
             embed = discord.Embed(
                 title="Edit Request",
                 description="Select one of your active requests to edit.",
-                color=discord.Color.blurple(),
+                color=self.cog._panel_color(),
             )
+            embed = self.cog._apply_configured_embed_image(embed)
             await interaction.followup.send(
                 embed=embed,
                 view=HiringRequestSelectView(self.cog, action="edit", requests=result),
@@ -394,8 +395,9 @@ class HiringRequestMenuView(discord.ui.View):
             embed = discord.Embed(
                 title="Delete Request",
                 description="Select one of your active requests to delete.",
-                color=discord.Color.red(),
+                color=self.cog._panel_color(),
             )
+            embed = self.cog._apply_configured_embed_image(embed)
             await interaction.followup.send(
                 embed=embed,
                 view=HiringRequestSelectView(self.cog, action="delete", requests=result),
@@ -432,8 +434,9 @@ class HiringPanelView(discord.ui.View):
         menu_embed = discord.Embed(
             title=f"{menu_title} ({count}/{self.cog.max_open_requests})",
             description="Use the buttons below to add, edit, or delete your hiring requests.",
-            color=discord.Color.blurple(),
+            color=self.cog._panel_color(),
         )
+        menu_embed = self.cog._apply_configured_embed_image(menu_embed)
         await interaction.followup.send(
             embed=menu_embed,
             view=HiringRequestMenuView(self.cog),
@@ -453,6 +456,7 @@ class Hiring(commands.Cog):
             "panel_message": "Click the button below to submit a hiring post.",
             "panel_message_id": None,
             "panel_embed_title": "Hiring Request Menu",
+            "embed_image_url": None,
             "output_channel_id": None,
             "use_panel_channel_for_output": False,
             "content_filter_enabled": True,
@@ -504,6 +508,52 @@ class Hiring(commands.Cog):
             upsert=True,
         )
 
+    def _panel_color(self):
+        return getattr(self.bot, "recipient_color", self.bot.main_color)
+
+    def _apply_configured_embed_image(self, embed: discord.Embed) -> discord.Embed:
+        image_url = str(self.config.get("embed_image_url") or "").strip()
+        if image_url:
+            embed.set_image(url=image_url)
+        return embed
+
+    async def _validate_image_url(self, image_url: str) -> Tuple[bool, Optional[str]]:
+        parsed = urlparse(image_url)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            return False, "Please provide a valid http(s) image URL."
+
+        def is_image_content_type(content_type: Optional[str]) -> bool:
+            if not content_type:
+                return False
+            normalized = content_type.split(";")[0].strip().lower()
+            return normalized.startswith("image/")
+
+        try:
+            timeout = aiohttp.ClientTimeout(total=12)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                try:
+                    async with session.head(image_url, allow_redirects=True) as response:
+                        if response.status < 400:
+                            if is_image_content_type(response.headers.get("Content-Type")):
+                                return True, None
+                        elif response.status not in {405, 501}:
+                            return False, f"Image URL returned HTTP {response.status}."
+                except Exception:
+                    pass
+
+                async with session.get(image_url, allow_redirects=True) as response:
+                    if response.status >= 400:
+                        return False, f"Image URL returned HTTP {response.status}."
+
+                    content_type = response.headers.get("Content-Type")
+                    if not is_image_content_type(content_type):
+                        normalized = (content_type or "unknown").split(";")[0].strip().lower()
+                        return False, f"URL does not appear to be an image (Content-Type: {normalized})."
+
+            return True, None
+        except Exception as exc:
+            return False, f"Could not validate image URL: {exc}"
+
     async def send_interaction_debug(self, interaction: discord.Interaction, context: str, exc: Exception):
         detail = f"{type(exc).__name__}: {exc}"
         trace = traceback.format_exc()
@@ -542,8 +592,9 @@ class Hiring(commands.Cog):
         embed = discord.Embed(
             title=(self.config.get("panel_embed_title") or "Hiring Request Menu")[:256],
             description=panel_message,
-            color=self.bot.main_color,
+            color=self._panel_color(),
         )
+        embed = self._apply_configured_embed_image(embed)
         view = HiringPanelView(self)
 
         try:
@@ -701,20 +752,38 @@ class Hiring(commands.Cog):
 
         return None
 
-    def _build_hiring_embed(self, user: discord.abc.User, request_data: Dict, request_id: Optional[str] = None) -> discord.Embed:
+    def _build_hiring_embed(
+        self,
+        user: Optional[discord.abc.User],
+        request_data: Dict,
+        request_id: Optional[str] = None,
+    ) -> discord.Embed:
         embed = discord.Embed(
             title="New Hiring Post",
-            color=discord.Color.blue(),
+            color=self.bot.main_color,
             timestamp=datetime.now(timezone.utc),
         )
-        embed.add_field(name="Submitted By", value=f"{user.mention} ({user})", inline=False)
-        embed.add_field(name="Company Name", value=request_data["company_name"], inline=False)
-        embed.add_field(name="Position", value=request_data["position"], inline=False)
-        embed.add_field(name="Description", value=request_data["description"], inline=False)
-        embed.add_field(name="Discord Server Link", value=request_data["discord_server_link"], inline=False)
+
+        if user is not None:
+            submitted_by = f"{user.mention} ({user})"
+        else:
+            user_id = str(request_data.get("user_id") or "").strip()
+            username = str(request_data.get("username") or "").strip()
+            if user_id.isdigit() and username:
+                submitted_by = f"<@{user_id}> ({username})"
+            elif user_id.isdigit():
+                submitted_by = f"<@{user_id}>"
+            else:
+                submitted_by = username or "Unknown User"
+
+        embed.add_field(name="Submitted By", value=submitted_by, inline=False)
+        embed.add_field(name="Company Name", value=str(request_data.get("company_name") or "Not provided"), inline=False)
+        embed.add_field(name="Position", value=str(request_data.get("position") or "Not provided"), inline=False)
+        embed.add_field(name="Description", value=str(request_data.get("description") or "Not provided"), inline=False)
+        embed.add_field(name="Discord Server Link", value=str(request_data.get("discord_server_link") or "Not provided"), inline=False)
         post_id_text = str(request_id) if request_id is not None else "Unknown"
         embed.set_footer(text=f"Post ID: {post_id_text}")
-        return embed
+        return self._apply_configured_embed_image(embed)
 
     async def remove_request_message(self, request_id: str, guild: Optional[discord.Guild] = None):
         mapped = self.request_message_map.get(str(request_id))
@@ -822,6 +891,30 @@ class Hiring(commands.Cog):
 
         try:
             timeout = aiohttp.ClientTimeout(total=15)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(endpoint, params=params, headers=headers) as response:
+                    if response.status in (200, 206):
+                        data = await response.json(content_type=None)
+                        if isinstance(data, list):
+                            return True, data
+                        return True, []
+                    body = await response.text()
+                    return False, f"HTTP {response.status}: {body[:300]}"
+        except Exception as exc:
+            return False, str(exc)
+
+    async def list_active_requests_for_guild(self, guild_id: str):
+        endpoint = self._supabase_endpoint()
+        headers = self._supabase_headers()
+        params = {
+            "select": "id,user_id,username,company_name,position,description,discord_server_link,submitted_at",
+            "guild_id": f"eq.{guild_id}",
+            "order": "submitted_at.asc",
+            "limit": "1000",
+        }
+
+        try:
+            timeout = aiohttp.ClientTimeout(total=20)
             async with aiohttp.ClientSession(timeout=timeout) as session:
                 async with session.get(endpoint, params=params, headers=headers) as response:
                     if response.status in (200, 206):
@@ -1084,6 +1177,7 @@ class Hiring(commands.Cog):
             description=description,
             color=self.bot.main_color,
         )
+        embed = self._apply_configured_embed_image(embed)
         await ctx.send(embed=embed)
 
     @checks.has_permissions(PermissionLevel.ADMINISTRATOR)
@@ -1139,6 +1233,24 @@ class Hiring(commands.Cog):
         self.config["panel_embed_title"] = normalized
         await self.update_config()
         await ctx.send(f"✅ Panel/menu embed title set to: {normalized}")
+
+    @checks.has_permissions(PermissionLevel.ADMINISTRATOR)
+    @hiringconfig.command(name="setembedimage")
+    async def hiringconfig_setembedimage(self, ctx, *, image_url: str):
+        """Set a global image URL shown at the bottom of all hiring embeds. Use 'none' to disable."""
+        value = image_url.strip()
+        if value.lower() in {"none", "off", "disable", "disabled", "remove", "null"}:
+            self.config["embed_image_url"] = None
+            await self.update_config()
+            return await ctx.send("✅ Cleared hiring embed image. Embeds will no longer include a bottom image.")
+
+        ok, error = await self._validate_image_url(value)
+        if not ok:
+            return await ctx.send(f"❌ {error} Use `none` to disable.")
+
+        self.config["embed_image_url"] = value
+        await self.update_config()
+        await ctx.send("✅ Hiring embed image updated. It will now appear at the bottom of all hiring embeds.")
 
     @checks.has_permissions(PermissionLevel.ADMINISTRATOR)
     @hiringconfig.command(name="usepaneloutput")
@@ -1224,6 +1336,8 @@ class Hiring(commands.Cog):
                 field_value = field_value[:1021] + "..."
             embed.add_field(name=str(key)[:256], value=field_value, inline=False)
 
+        embed = self._apply_configured_embed_image(embed)
+
         await ctx.send(embed=embed)
 
     @checks.has_permissions(PermissionLevel.ADMINISTRATOR)
@@ -1257,6 +1371,86 @@ class Hiring(commands.Cog):
             reason=reason,
         )
         await ctx.send(f"✅ Deleted request `{rid}`")
+
+    @checks.has_permissions(PermissionLevel.ADMINISTRATOR)
+    @hiring_group.command(name="relistactive")
+    async def hiring_relistactive(self, ctx):
+        """Repost all active hiring requests for this server to the output channel."""
+        if ctx.guild is None:
+            return await ctx.send("❌ This command can only be used in a server.")
+
+        if not self.supabase_ready():
+            return await ctx.send("❌ Supabase is not configured. Use `hiringconfig setsupabase` first.")
+
+        channel = self._get_output_channel(ctx.guild)
+        if channel is None:
+            return await ctx.send("❌ Hiring output channel is not configured or not found.")
+
+        ok, rows = await self.list_active_requests_for_guild(guild_id=str(ctx.guild.id))
+        if not ok:
+            return await ctx.send(f"❌ Could not load active requests: {rows}")
+
+        if not rows:
+            return await ctx.send("ℹ️ No active hiring requests were found for this server.")
+
+        relisted_count = 0
+        failed_count = 0
+
+        for row in rows:
+            request_id = str(row.get("id") or "").strip()
+            if not request_id:
+                failed_count += 1
+                continue
+
+            mapped = self.request_message_map.get(request_id)
+            if mapped:
+                old_channel = self.bot.get_channel(mapped.get("channel_id"))
+                if old_channel is not None:
+                    try:
+                        old_message = await old_channel.fetch_message(mapped.get("message_id"))
+                        await old_message.delete()
+                    except Exception:
+                        pass
+
+            user_id = str(row.get("user_id") or "").strip()
+            user_obj: Optional[discord.abc.User] = None
+            if user_id.isdigit():
+                user_obj = ctx.guild.get_member(int(user_id))
+                if user_obj is None:
+                    user_obj = self.bot.get_user(int(user_id))
+                if user_obj is None:
+                    try:
+                        user_obj = await self.bot.fetch_user(int(user_id))
+                    except Exception:
+                        user_obj = None
+
+            embed = self._build_hiring_embed(
+                user=user_obj,
+                request_data=row,
+                request_id=request_id,
+            )
+
+            try:
+                message = await channel.send(embed=embed)
+            except Exception:
+                failed_count += 1
+                continue
+
+            self.request_message_map[request_id] = {
+                "channel_id": channel.id,
+                "message_id": message.id,
+            }
+            relisted_count += 1
+
+        await self.update_request_message_map()
+
+        if self.config.get("use_panel_channel_for_output"):
+            await self._send_or_resend_panel_message(ctx.guild)
+
+        await ctx.send(
+            f"✅ Relisted {relisted_count} active hiring post(s)."
+            + (f" ⚠️ Failed: {failed_count}." if failed_count else "")
+        )
 
     @checks.has_permissions(PermissionLevel.ADMINISTRATOR)
     @hiring_group.command(name="deleteuserrequests")
@@ -1395,6 +1589,11 @@ class Hiring(commands.Cog):
             inline=False,
         )
         embed.add_field(
+            name="Embed Image URL",
+            value=self.config.get("embed_image_url") or "None",
+            inline=False,
+        )
+        embed.add_field(
             name="Supabase URL",
             value=self.config.get("supabase_url") or "Not set",
             inline=False,
@@ -1419,6 +1618,8 @@ class Hiring(commands.Cog):
             value=str(self.config.get("auto_delete_days") or 14),
             inline=True,
         )
+
+        embed = self._apply_configured_embed_image(embed)
 
         await ctx.send(embed=embed)
 
