@@ -89,6 +89,12 @@ class HiringSubmissionModal(discord.ui.Modal, title="Hiring Submission"):
                 ephemeral=True,
             )
 
+        if self.mode == "create" and self.cog.is_user_blacklisted(str(interaction.user.id)):
+            return await interaction.response.send_message(
+                "❌ You are blacklisted from creating hiring posts on this server.",
+                ephemeral=True,
+            )
+
         if not self.cog.supabase_ready():
             return await interaction.response.send_message(
                 "❌ Supabase is not configured. Ask an administrator to set it up.",
@@ -330,6 +336,12 @@ class HiringRequestMenuView(discord.ui.View):
 
     @discord.ui.button(label="Add New Request", style=discord.ButtonStyle.primary)
     async def add_request(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.cog.is_user_blacklisted(str(interaction.user.id)):
+            return await interaction.response.send_message(
+                "❌ You are blacklisted from creating hiring posts on this server.",
+                ephemeral=True,
+            )
+
         await interaction.response.send_modal(HiringSubmissionModal(self.cog, mode="create"))
 
     @discord.ui.button(label="Edit Current Request", style=discord.ButtonStyle.secondary)
@@ -445,6 +457,7 @@ class Hiring(commands.Cog):
             "use_panel_channel_for_output": False,
             "content_filter_enabled": True,
             "profanity_api_url": "https://vector.profanity.dev",
+            "banned_user_ids": [],
             "auto_delete_enabled": True,
             "auto_delete_days": 14,
             "supabase_url": None,
@@ -564,6 +577,48 @@ class Hiring(commands.Cog):
             return output_channel
 
         return None
+
+    def _get_blacklisted_user_ids(self) -> List[str]:
+        configured = self.config.get("banned_user_ids") or []
+        users: List[str] = []
+        for user_id in configured:
+            normalized = str(user_id).strip()
+            if normalized and normalized not in users:
+                users.append(normalized)
+        return users
+
+    def is_user_blacklisted(self, user_id: str) -> bool:
+        if not user_id:
+            return False
+        return str(user_id) in self._get_blacklisted_user_ids()
+
+    async def add_user_to_blacklist(self, user_id: str) -> bool:
+        normalized = str(user_id).strip()
+        if not normalized:
+            return False
+
+        users = self._get_blacklisted_user_ids()
+        if normalized in users:
+            return False
+
+        users.append(normalized)
+        self.config["banned_user_ids"] = users
+        await self.update_config()
+        return True
+
+    async def remove_user_from_blacklist(self, user_id: str) -> bool:
+        normalized = str(user_id).strip()
+        if not normalized:
+            return False
+
+        users = self._get_blacklisted_user_ids()
+        if normalized not in users:
+            return False
+
+        users = [item for item in users if item != normalized]
+        self.config["banned_user_ids"] = users
+        await self.update_config()
+        return True
 
     async def _check_message_with_profanity_api(self, message: str) -> Tuple[bool, Optional[bool], Optional[str]]:
         api_url = str(self.config.get("profanity_api_url") or "https://vector.profanity.dev").strip()
@@ -973,6 +1028,65 @@ class Hiring(commands.Cog):
         await ctx.send_help(ctx.command)
 
     @checks.has_permissions(PermissionLevel.ADMINISTRATOR)
+    @hiring_group.command(name="banuser")
+    async def hiring_banuser(self, ctx, user: discord.Member):
+        """Blacklist a user from creating hiring posts."""
+        if ctx.guild is None:
+            return await ctx.send("❌ This command can only be used in a server.")
+
+        if user.id == ctx.author.id:
+            return await ctx.send("❌ You cannot blacklist yourself.")
+
+        added = await self.add_user_to_blacklist(str(user.id))
+        if not added:
+            return await ctx.send("ℹ️ That user is already blacklisted.")
+
+        await ctx.send(f"✅ {user.mention} is now blacklisted from creating hiring posts.")
+
+    @checks.has_permissions(PermissionLevel.ADMINISTRATOR)
+    @hiring_group.command(name="unbanuser")
+    async def hiring_unbanuser(self, ctx, user: discord.Member):
+        """Remove a user from the hiring-post blacklist."""
+        if ctx.guild is None:
+            return await ctx.send("❌ This command can only be used in a server.")
+
+        removed = await self.remove_user_from_blacklist(str(user.id))
+        if not removed:
+            return await ctx.send("ℹ️ That user is not blacklisted.")
+
+        await ctx.send(f"✅ {user.mention} can create hiring posts again.")
+
+    @checks.has_permissions(PermissionLevel.ADMINISTRATOR)
+    @hiring_group.command(name="listbannedusers")
+    async def hiring_listbannedusers(self, ctx):
+        """List users blacklisted from creating hiring posts."""
+        if ctx.guild is None:
+            return await ctx.send("❌ This command can only be used in a server.")
+
+        banned_ids = self._get_blacklisted_user_ids()
+        if not banned_ids:
+            return await ctx.send("ℹ️ No users are currently blacklisted from hiring posts.")
+
+        lines = []
+        for user_id in banned_ids:
+            member = ctx.guild.get_member(int(user_id)) if user_id.isdigit() else None
+            if member is not None:
+                lines.append(f"• {member.mention} (`{user_id}`)")
+            else:
+                lines.append(f"• Unknown User (`{user_id}`)")
+
+        description = "\n".join(lines)
+        if len(description) > 4000:
+            description = description[:3997] + "..."
+
+        embed = discord.Embed(
+            title=f"Blacklisted Hiring Users ({len(banned_ids)})",
+            description=description,
+            color=self.bot.main_color,
+        )
+        await ctx.send(embed=embed)
+
+    @checks.has_permissions(PermissionLevel.ADMINISTRATOR)
     @hiringconfig.command(name="setpanelchannel")
     async def hiringconfig_setpanelchannel(self, ctx, channel: discord.TextChannel):
         """Set the channel where the hiring button panel should be posted."""
@@ -1145,6 +1259,67 @@ class Hiring(commands.Cog):
         await ctx.send(f"✅ Deleted request `{rid}`")
 
     @checks.has_permissions(PermissionLevel.ADMINISTRATOR)
+    @hiring_group.command(name="deleteuserrequests")
+    async def hiring_deleteuserrequests(self, ctx, user_id: str, *, reason: str = "Removed by administrator."):
+        """Delete all hiring requests from one user ID in this server."""
+        if ctx.guild is None:
+            return await ctx.send("❌ This command can only be used in a server.")
+
+        target_user_id = user_id.strip()
+        mention_match = re.fullmatch(r"<@!?(\d+)>", target_user_id)
+        if mention_match:
+            target_user_id = mention_match.group(1)
+
+        if not target_user_id.isdigit():
+            return await ctx.send("❌ Please provide a valid numeric user ID (or mention).")
+
+        reason = reason.strip() or "Removed by administrator."
+
+        ok, rows = await self.list_open_requests(guild_id=str(ctx.guild.id), user_id=target_user_id)
+        if not ok:
+            return await ctx.send(f"❌ Could not load requests for user `{target_user_id}`: {rows}")
+
+        if not rows:
+            return await ctx.send(f"ℹ️ No hiring requests found for user `{target_user_id}` in this server.")
+
+        deleted_count = 0
+        failed_count = 0
+        for row in rows:
+            request_id = str(row.get("id") or "").strip()
+            if not request_id:
+                continue
+
+            ok_delete, _ = await self.delete_request_by_id_admin(
+                request_id=request_id,
+                guild_id=str(ctx.guild.id),
+            )
+            if not ok_delete:
+                failed_count += 1
+                continue
+
+            deleted_count += 1
+            await self.remove_request_message(request_id=request_id, guild=ctx.guild)
+            await self.notify_request_deleted(
+                user_id=target_user_id,
+                request_id=request_id,
+                deleted_by=str(ctx.author),
+                reason=reason,
+            )
+
+        if deleted_count == 0:
+            return await ctx.send(
+                f"❌ Could not delete any requests for user `{target_user_id}`."
+            )
+
+        if failed_count > 0:
+            await ctx.send(
+                f"✅ Deleted {deleted_count} request(s) for user `{target_user_id}`. "
+                f"⚠️ Failed to delete {failed_count} request(s)."
+            )
+        else:
+            await ctx.send(f"✅ Deleted {deleted_count} request(s) for user `{target_user_id}`.")
+
+    @checks.has_permissions(PermissionLevel.ADMINISTRATOR)
     @hiringconfig.command(name="setautodelete")
     async def hiringconfig_setautodelete(self, ctx, days: int):
         """Set auto-delete age in days for hiring requests."""
@@ -1206,6 +1381,11 @@ class Hiring(commands.Cog):
         embed.add_field(
             name="Filter API URL",
             value=(self.config.get("profanity_api_url") or "https://vector.profanity.dev")[:1024],
+            inline=True,
+        )
+        embed.add_field(
+            name="Blacklisted Users",
+            value=str(len(self._get_blacklisted_user_ids())),
             inline=True,
         )
         embed.add_field(name="Hiring Post Title", value="New Hiring Post", inline=False)
