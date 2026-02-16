@@ -416,6 +416,11 @@ class HiringPanelView(discord.ui.View):
         super().__init__(timeout=None)
         self.cog = cog
 
+        for child in self.children:
+            if isinstance(child, discord.ui.Button) and child.custom_id == "hiring:open_form":
+                child.style = self.cog._panel_button_style()
+                break
+
     @discord.ui.button(
         label="Hiring Request Menu",
         style=discord.ButtonStyle.primary,
@@ -444,6 +449,53 @@ class HiringPanelView(discord.ui.View):
         )
 
 
+class HiringButtonColorSelectButton(discord.ui.Button):
+    def __init__(self, cog: "Hiring", owner_id: int, style_key: str, label: str, style: discord.ButtonStyle):
+        super().__init__(label=label, style=style, custom_id=f"hiring:set_button_style:{style_key}")
+        self.cog = cog
+        self.owner_id = owner_id
+        self.style_key = style_key
+
+    async def callback(self, interaction: discord.Interaction):
+        if interaction.user.id != self.owner_id:
+            return await interaction.response.send_message(
+                "❌ Only the admin who ran this command can choose the button color.",
+                ephemeral=True,
+            )
+
+        self.cog.config["panel_button_style"] = self.style_key
+        await self.cog.update_config()
+
+        if interaction.guild is not None and self.cog.config.get("panel_channel_id"):
+            await self.cog._send_or_resend_panel_message(interaction.guild)
+
+        view = self.view
+        if isinstance(view, discord.ui.View):
+            for item in view.children:
+                if isinstance(item, discord.ui.Button):
+                    item.disabled = True
+
+        try:
+            if interaction.message is not None and isinstance(view, discord.ui.View):
+                await interaction.message.edit(view=view)
+        except Exception:
+            pass
+
+        await interaction.response.send_message(
+            f"✅ Hiring Request Menu button color set to **{self.label}**.",
+            ephemeral=True,
+        )
+
+
+class HiringButtonColorConfigView(discord.ui.View):
+    def __init__(self, cog: "Hiring", owner_id: int):
+        super().__init__(timeout=300)
+        self.add_item(HiringButtonColorSelectButton(cog, owner_id, "primary", "Blurple", discord.ButtonStyle.primary))
+        self.add_item(HiringButtonColorSelectButton(cog, owner_id, "secondary", "Gray", discord.ButtonStyle.secondary))
+        self.add_item(HiringButtonColorSelectButton(cog, owner_id, "success", "Green", discord.ButtonStyle.success))
+        self.add_item(HiringButtonColorSelectButton(cog, owner_id, "danger", "Red", discord.ButtonStyle.danger))
+
+
 class Hiring(commands.Cog):
     """Collect hiring submissions via a button panel and save to Supabase."""
 
@@ -456,6 +508,7 @@ class Hiring(commands.Cog):
             "panel_message": "Click the button below to submit a hiring post.",
             "panel_message_id": None,
             "panel_embed_title": "Hiring Request Menu",
+            "panel_button_style": "primary",
             "embed_image_url": None,
             "output_channel_id": None,
             "use_panel_channel_for_output": False,
@@ -513,6 +566,16 @@ class Hiring(commands.Cog):
 
     def _post_color(self):
         return getattr(self.bot, "recipient_color", getattr(self.bot, "main_color", discord.Color.blurple()))
+
+    def _panel_button_style(self) -> discord.ButtonStyle:
+        style_key = str(self.config.get("panel_button_style") or "primary").strip().lower()
+        mapping = {
+            "primary": discord.ButtonStyle.primary,
+            "secondary": discord.ButtonStyle.secondary,
+            "success": discord.ButtonStyle.success,
+            "danger": discord.ButtonStyle.danger,
+        }
+        return mapping.get(style_key, discord.ButtonStyle.primary)
 
     def _apply_configured_embed_image(self, embed: discord.Embed) -> discord.Embed:
         image_url = str(self.config.get("embed_image_url") or "").strip()
@@ -1236,6 +1299,36 @@ class Hiring(commands.Cog):
         self.config["panel_embed_title"] = normalized
         await self.update_config()
         await ctx.send(f"✅ Panel/menu embed title set to: {normalized}")
+
+    @checks.has_permissions(PermissionLevel.ADMINISTRATOR)
+    @hiringconfig.command(name="setmenubuttoncolor", aliases=["setbuttoncolor", "buttoncolor"])
+    async def hiringconfig_setmenubuttoncolor(self, ctx):
+        """Choose the Hiring Request Menu button color from clickable options."""
+        if ctx.guild is None:
+            return await ctx.send("❌ This command can only be used in a server.")
+
+        current = str(self.config.get("panel_button_style") or "primary").strip().lower()
+        current_label = {
+            "primary": "Blurple",
+            "secondary": "Gray",
+            "success": "Green",
+            "danger": "Red",
+        }.get(current, "Blurple")
+
+        embed = discord.Embed(
+            title="Select Hiring Menu Button Color",
+            description=(
+                "Click one of the buttons below to set the **Hiring Request Menu** button color.\n"
+                f"Current color: **{current_label}**"
+            ),
+            color=self._post_color(),
+        )
+        embed = self._apply_configured_embed_image(embed)
+
+        await ctx.send(
+            embed=embed,
+            view=HiringButtonColorConfigView(self, owner_id=ctx.author.id),
+        )
 
     @checks.has_permissions(PermissionLevel.ADMINISTRATOR)
     @hiringconfig.command(name="setembedimage")

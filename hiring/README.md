@@ -16,6 +16,7 @@ Panel setup commands:
 - `hiringconfig setoutputchannel <#channel>`
 - `hiringconfig usepaneloutput <true|false>`
 - `hiring setembedtitle <title>`
+- `hiringconfig setmenubuttoncolor` (aliases: `setbuttoncolor`, `buttoncolor`)
 - `hiringconfig setembedimage <image_url|none>`
 - `hiring requestinfo <id_or_uuid>`
 - `hiring deleterequest <id_or_uuid>`
