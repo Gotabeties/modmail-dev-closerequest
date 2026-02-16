@@ -415,9 +415,6 @@ class HiringPanelView(discord.ui.View):
     def __init__(self, cog: "Hiring"):
         super().__init__(timeout=None)
         self.cog = cog
-        panel_button = self.get_item("hiring:open_form")
-        if isinstance(panel_button, discord.ui.Button):
-            panel_button.style = self.cog._panel_button_style()
 
     @discord.ui.button(
         label="Hiring Request Menu",
@@ -514,38 +511,10 @@ class Hiring(commands.Cog):
         )
 
     def _panel_color(self):
-        raw = getattr(self.bot, "main_color", getattr(self.bot, "recipient_color", discord.Color.blurple()))
-        if isinstance(raw, discord.Colour):
-            return raw
-        try:
-            return discord.Color(raw)
-        except Exception:
-            return discord.Color.blurple()
+        return getattr(self.bot, "main_color", getattr(self.bot, "recipient_color", discord.Color.blurple()))
 
     def _post_color(self):
-        raw = getattr(self.bot, "recipient_color", getattr(self.bot, "main_color", discord.Color.blurple()))
-        if isinstance(raw, discord.Colour):
-            return raw
-        try:
-            return discord.Color(raw)
-        except Exception:
-            return discord.Color.blurple()
-
-    def _panel_button_style(self) -> discord.ButtonStyle:
-        panel_color = self._panel_color()
-        target = (panel_color.r, panel_color.g, panel_color.b)
-
-        candidates = {
-            discord.ButtonStyle.primary: (88, 101, 242),
-            discord.ButtonStyle.success: (87, 242, 135),
-            discord.ButtonStyle.danger: (237, 66, 69),
-            discord.ButtonStyle.secondary: (79, 84, 92),
-        }
-
-        def distance(rgb_a, rgb_b) -> int:
-            return sum((a - b) ** 2 for a, b in zip(rgb_a, rgb_b))
-
-        return min(candidates, key=lambda style: distance(target, candidates[style]))
+        return getattr(self.bot, "recipient_color", getattr(self.bot, "main_color", discord.Color.blurple()))
 
     def _normalize_embed_title_text(self, title: str) -> str:
         value = str(title or "")
