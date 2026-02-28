@@ -16,7 +16,9 @@ Panel setup commands:
 - `hiringconfig setoutputchannel <#channel>`
 - `hiringconfig usepaneloutput <true|false>`
 - `hiringconfig filter <true|false>`
+- `hiringconfig setfilterprovider <openai|sightengine>`
 - `hiringconfig setfilterkey <openai_api_key>`
+- `hiringconfig setsightengine <api_user> <api_secret>`
 - `hiringconfig testfilter <text>`
 - `hiring setembedtitle <title>`
 - `hiringconfig setmenubuttoncolor` (aliases: `setbuttoncolor`, `buttoncolor`)
@@ -29,12 +31,23 @@ Panel setup commands:
 
 ## Content Filter Setup (OpenAI Moderation)
 
-The hiring content filter uses OpenAI Moderation (`https://api.openai.com/v1/moderations`) with model `omni-moderation-latest`.
+The hiring content filter can use either OpenAI Moderation or Sightengine Text Moderation.
 
-1. Enable the filter: `hiringconfig filter true`
-2. Set your API key: `hiringconfig setfilterkey <openai_api_key>`
-3. Optional: clear saved key with `hiringconfig setfilterkey none`
-4. Troubleshoot with: `hiringconfig testfilter <text>`
+### OpenAI
+
+1. Select provider: `hiringconfig setfilterprovider openai`
+2. Enable the filter: `hiringconfig filter true`
+3. Set your API key: `hiringconfig setfilterkey <openai_api_key>`
+4. Optional: clear key with `hiringconfig setfilterkey none`
+5. Test: `hiringconfig testfilter <text>`
+
+### Sightengine
+
+1. Select provider: `hiringconfig setfilterprovider sightengine`
+2. Enable the filter: `hiringconfig filter true`
+3. Set credentials: `hiringconfig setsightengine <api_user> <api_secret>`
+4. Optional: clear credentials with `hiringconfig setsightengine none none`
+5. Test: `hiringconfig testfilter <text>`
 
 ## Supabase Setup
 

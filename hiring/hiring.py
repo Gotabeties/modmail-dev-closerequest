@@ -127,8 +127,9 @@ class HiringSubmissionModal(discord.ui.Modal, title="Hiring Submission"):
         moderation_result = await self.cog.validate_hiring_content(base_payload)
         if moderation_result:
             if moderation_result.get("type") == "not_configured":
+                reason = str(moderation_result.get("error") or "Missing provider credentials.")
                 return await interaction.followup.send(
-                    "❌ Hiring content filter is enabled but not configured. Ask an admin to run `hiringconfig setfilterkey <openai_api_key>`.",
+                    f"❌ Hiring content filter is enabled but not configured. {reason}",
                     ephemeral=True,
                 )
 
@@ -519,9 +520,16 @@ class Hiring(commands.Cog):
             "output_channel_id": None,
             "use_panel_channel_for_output": False,
             "content_filter_enabled": True,
+            "content_filter_provider": "openai",
             "openai_moderation_api_url": "https://api.openai.com/v1/moderations",
             "openai_moderation_model": "omni-moderation-latest",
             "openai_api_key": None,
+            "sightengine_text_api_url": "https://api.sightengine.com/1.0/text/check.json",
+            "sightengine_api_user": None,
+            "sightengine_api_secret": None,
+            "sightengine_mode": "standard",
+            "sightengine_lang": "en",
+            "sightengine_score_threshold": 0.5,
             "banned_user_ids": [],
             "auto_delete_enabled": True,
             "auto_delete_days": 14,
@@ -735,6 +743,12 @@ class Hiring(commands.Cog):
         await self.update_config()
         return True
 
+    def _filter_provider(self) -> str:
+        provider = str(self.config.get("content_filter_provider") or "openai").strip().lower()
+        if provider not in {"openai", "sightengine"}:
+            return "openai"
+        return provider
+
     async def remove_user_from_blacklist(self, user_id: str) -> bool:
         normalized = str(user_id).strip()
         if not normalized:
@@ -758,7 +772,7 @@ class Hiring(commands.Cog):
         api_key = str(self.config.get("openai_api_key") or "").strip()
 
         if not api_key:
-            return False, None, "OpenAI API key is not configured."
+            return False, None, "OpenAI API key is not configured. Ask an admin to run `hiringconfig setfilterkey <openai_api_key>`."
 
         headers = {
             "Content-Type": "application/json",
@@ -836,6 +850,139 @@ class Hiring(commands.Cog):
         except Exception as exc:
             return False, None, str(exc)
 
+    async def _run_sightengine_moderation(
+        self,
+        text: str,
+    ) -> Tuple[bool, Optional[Dict[str, Any]], Optional[str]]:
+        api_url = str(self.config.get("sightengine_text_api_url") or "https://api.sightengine.com/1.0/text/check.json").strip()
+        api_user = str(self.config.get("sightengine_api_user") or "").strip()
+        api_secret = str(self.config.get("sightengine_api_secret") or "").strip()
+        mode = str(self.config.get("sightengine_mode") or "standard").strip()
+        lang = str(self.config.get("sightengine_lang") or "en").strip()
+
+        if not api_user or not api_secret:
+            return False, None, "Sightengine credentials are not configured. Ask an admin to run `hiringconfig setsightengine <api_user> <api_secret>`."
+
+        payload: Dict[str, Any] = {
+            "text": text,
+            "mode": mode,
+            "lang": lang,
+            "api_user": api_user,
+            "api_secret": api_secret,
+        }
+
+        try:
+            timeout = aiohttp.ClientTimeout(total=10)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.post(api_url, data=payload) as response:
+                    if response.status != 200:
+                        request_id = response.headers.get("x-request-id")
+                        retry_after = response.headers.get("retry-after")
+                        try:
+                            error_data: Any = await response.json(content_type=None)
+                            if isinstance(error_data, dict):
+                                error_message = str(
+                                    error_data.get("error")
+                                    or error_data.get("message")
+                                    or error_data.get("status")
+                                    or "Unknown error"
+                                )
+                            else:
+                                error_message = "Unknown error"
+                        except Exception:
+                            body_text = await response.text()
+                            error_message = body_text[:200]
+
+                        details: List[str] = [f"HTTP {response.status}: {error_message}"]
+                        if retry_after:
+                            details.append(f"retry_after={retry_after}s")
+                        if request_id:
+                            details.append(f"request_id={request_id}")
+                        return False, None, " | ".join(details)
+
+                    try:
+                        data: Any = await response.json(content_type=None)
+                    except Exception:
+                        raw = await response.text()
+                        return False, None, f"Invalid JSON response: {raw[:200]}"
+        except Exception as exc:
+            return False, None, str(exc)
+
+        if not isinstance(data, dict):
+            return False, None, "Unexpected Sightengine response format."
+
+        data["_mode_used"] = mode
+        data["_provider_used"] = "sightengine"
+        return True, data, None
+
+    def _extract_openai_flagged_categories(self, first_result: Dict[str, Any]) -> List[str]:
+        categories = first_result.get("categories")
+        if not isinstance(categories, dict):
+            return []
+
+        flagged_categories: List[str] = []
+        for name, state in categories.items():
+            if isinstance(state, bool) and state:
+                flagged_categories.append(str(name))
+        return flagged_categories
+
+    def _extract_sightengine_flagged_categories(self, result: Dict[str, Any]) -> List[str]:
+        flagged: List[str] = []
+        threshold_raw = self.config.get("sightengine_score_threshold")
+        try:
+            threshold = float(threshold_raw if threshold_raw is not None else 0.5)
+        except Exception:
+            threshold = 0.5
+
+        ml_keys = ["sexual", "discriminatory", "insulting", "violent", "toxic", "self-harm", "self_harm"]
+        for key in ml_keys:
+            value = result.get(key)
+            if isinstance(value, (int, float)) and float(value) >= threshold:
+                flagged.append(key)
+            elif isinstance(value, dict):
+                score = value.get("prob") if "prob" in value else value.get("score")
+                if isinstance(score, (int, float)) and float(score) >= threshold:
+                    flagged.append(key)
+
+        rule_keys = [
+            "profanity",
+            "personal",
+            "link",
+            "extremism",
+            "weapon",
+            "medical",
+            "drug",
+            "self-harm",
+            "violence",
+            "spam",
+            "content-trade",
+            "money-transaction",
+            "blacklist",
+        ]
+        for key in rule_keys:
+            value = result.get(key)
+            if isinstance(value, dict):
+                matches = value.get("matches")
+                count = value.get("count")
+                if isinstance(matches, list) and len(matches) > 0:
+                    flagged.append(key)
+                    continue
+                if isinstance(count, int) and count > 0:
+                    flagged.append(key)
+                    continue
+                if isinstance(value.get("found"), bool) and value.get("found"):
+                    flagged.append(key)
+
+        seen = set()
+        deduped: List[str] = []
+        for item in flagged:
+            normalized = str(item)
+            if normalized in seen:
+                continue
+            seen.add(normalized)
+            deduped.append(normalized)
+        return deduped
+
     async def _check_message_with_openai_moderation(
         self,
         text: str,
@@ -855,9 +1002,22 @@ class Hiring(commands.Cog):
 
         return False, None, "Unexpected moderation API response format."
 
+    async def _check_message_with_sightengine_moderation(
+        self,
+        text: str,
+    ) -> Tuple[bool, Optional[bool], Optional[str]]:
+        ok, result, error = await self._run_sightengine_moderation(text=text)
+        if not ok or result is None:
+            return False, None, error
+
+        categories = self._extract_sightengine_flagged_categories(result)
+        return True, len(categories) > 0, None
+
     async def validate_hiring_content(self, payload: Dict) -> Optional[Dict[str, str]]:
         if not self.config.get("content_filter_enabled", True):
             return None
+
+        provider = self._filter_provider()
 
         fields_to_check = {
             "Company Name": str(payload.get("company_name") or ""),
@@ -869,7 +1029,11 @@ class Hiring(commands.Cog):
             if not value.strip():
                 continue
 
-            ok, blocked, error = await self._check_message_with_openai_moderation(text=value)
+            if provider == "sightengine":
+                ok, blocked, error = await self._check_message_with_sightengine_moderation(text=value)
+            else:
+                ok, blocked, error = await self._check_message_with_openai_moderation(text=value)
+
             if not ok:
                 if error and "not configured" in str(error).lower():
                     return {"type": "not_configured", "error": str(error)}
@@ -1456,6 +1620,18 @@ class Hiring(commands.Cog):
         )
 
     @checks.has_permissions(PermissionLevel.ADMINISTRATOR)
+    @hiringconfig.command(name="setfilterprovider", aliases=["filterprovider", "setprovider"])
+    async def hiringconfig_setfilterprovider(self, ctx, provider: str):
+        """Set hiring content filter provider: openai or sightengine."""
+        normalized = provider.strip().lower()
+        if normalized not in {"openai", "sightengine"}:
+            return await ctx.send("❌ Provider must be `openai` or `sightengine`.")
+
+        self.config["content_filter_provider"] = normalized
+        await self.update_config()
+        await ctx.send(f"✅ Hiring content filter provider set to `{normalized}`.")
+
+    @checks.has_permissions(PermissionLevel.ADMINISTRATOR)
     @hiringconfig.command(name="setfilterkey", aliases=["setopenaikey", "setmoderateapikey", "setapikey"])
     async def hiringconfig_setfilterkey(self, ctx, *, api_key: str):
         """Set the OpenAI API key used for hiring content filtering. Use 'none' to clear."""
@@ -1478,12 +1654,64 @@ class Hiring(commands.Cog):
         await ctx.send("✅ OpenAI API key saved for hiring content filter.")
 
     @checks.has_permissions(PermissionLevel.ADMINISTRATOR)
+    @hiringconfig.command(name="setsightengine")
+    async def hiringconfig_setsightengine(self, ctx, api_user: str, *, api_secret: str):
+        """Set Sightengine api_user and api_secret for hiring content filtering."""
+        user_value = api_user.strip()
+        secret_value = api_secret.strip()
+
+        clear_tokens = {"none", "off", "disable", "disabled", "remove", "null", "clear"}
+        if user_value.lower() in clear_tokens or secret_value.lower() in clear_tokens:
+            self.config["sightengine_api_user"] = None
+            self.config["sightengine_api_secret"] = None
+            await self.update_config()
+            return await ctx.send("✅ Cleared Sightengine credentials for hiring content filter.")
+
+        if not user_value or not secret_value:
+            return await ctx.send("❌ Sightengine `api_user` and `api_secret` are both required.")
+
+        self.config["sightengine_api_user"] = user_value
+        self.config["sightengine_api_secret"] = secret_value
+        await self.update_config()
+        await ctx.send("✅ Sightengine credentials saved for hiring content filter.")
+
+    @checks.has_permissions(PermissionLevel.ADMINISTRATOR)
     @hiringconfig.command(name="testfilter")
     async def hiringconfig_testfilter(self, ctx, *, text: str):
-        """Test the hiring content filter against OpenAI moderation and show debug details."""
+        """Test the active hiring content filter provider and show debug details."""
         value = text.strip()
         if not value:
             return await ctx.send("❌ Please provide text to test.")
+
+        provider = self._filter_provider()
+
+        if provider == "sightengine":
+            ok, result, error = await self._run_sightengine_moderation(text=value)
+            if not ok or result is None:
+                return await ctx.send(f"❌ Filter test failed: {error or 'Unknown error'}")
+
+            flagged_categories = self._extract_sightengine_flagged_categories(result)
+            flagged = len(flagged_categories) > 0
+
+            embed = discord.Embed(
+                title="Hiring Filter Test Result",
+                color=self._post_color(),
+            )
+            embed.add_field(name="Provider", value="sightengine", inline=True)
+            embed.add_field(name="Flagged", value=str(bool(flagged)), inline=True)
+            embed.add_field(
+                name="Mode",
+                value=str(result.get("_mode_used") or self.config.get("sightengine_mode") or "standard"),
+                inline=True,
+            )
+            embed.add_field(
+                name="Categories",
+                value=", ".join(flagged_categories) if flagged_categories else "None",
+                inline=False,
+            )
+
+            embed = self._apply_configured_embed_image(embed)
+            return await ctx.send(embed=embed)
 
         ok, first_result, error = await self._run_openai_moderation(text=value)
         if not ok or first_result is None:
@@ -1511,13 +1739,13 @@ class Hiring(commands.Cog):
             return await ctx.send(f"❌ Filter test failed: {error_text}")
 
         flagged = first_result.get("flagged")
-        categories = first_result.get("categories") if isinstance(first_result.get("categories"), dict) else {}
-        flagged_categories = [name for name, state in categories.items() if isinstance(state, bool) and state]
+        flagged_categories = self._extract_openai_flagged_categories(first_result)
 
         embed = discord.Embed(
             title="Hiring Filter Test Result",
             color=self._post_color(),
         )
+        embed.add_field(name="Provider", value="openai", inline=True)
         embed.add_field(name="Flagged", value=str(bool(flagged)), inline=True)
         embed.add_field(
             name="Model",
@@ -1797,13 +2025,32 @@ class Hiring(commands.Cog):
             inline=True,
         )
         embed.add_field(
-            name="Filter API URL",
+            name="Filter Provider",
+            value=self._filter_provider(),
+            inline=True,
+        )
+        embed.add_field(
+            name="OpenAI API URL",
             value=(self.config.get("openai_moderation_api_url") or "https://api.openai.com/v1/moderations")[:1024],
             inline=True,
         )
         embed.add_field(
-            name="Filter API Key",
+            name="OpenAI API Key",
             value="Configured" if self.config.get("openai_api_key") else "Not set",
+            inline=True,
+        )
+        embed.add_field(
+            name="Sightengine API URL",
+            value=(self.config.get("sightengine_text_api_url") or "https://api.sightengine.com/1.0/text/check.json")[:1024],
+            inline=True,
+        )
+        embed.add_field(
+            name="Sightengine Credentials",
+            value=(
+                "Configured"
+                if (self.config.get("sightengine_api_user") and self.config.get("sightengine_api_secret"))
+                else "Not set"
+            ),
             inline=True,
         )
         embed.add_field(
