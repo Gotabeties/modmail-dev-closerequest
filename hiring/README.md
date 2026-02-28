@@ -17,6 +17,7 @@ Panel setup commands:
 - `hiringconfig usepaneloutput <true|false>`
 - `hiringconfig filter <true|false>`
 - `hiringconfig setfilterkey <openai_api_key>`
+- `hiringconfig testfilter <text>`
 - `hiring setembedtitle <title>`
 - `hiringconfig setmenubuttoncolor` (aliases: `setbuttoncolor`, `buttoncolor`)
 - `hiringconfig setembedimage <image_url|none>`
@@ -33,6 +34,7 @@ The hiring content filter uses OpenAI Moderation (`https://api.openai.com/v1/mod
 1. Enable the filter: `hiringconfig filter true`
 2. Set your API key: `hiringconfig setfilterkey <openai_api_key>`
 3. Optional: clear saved key with `hiringconfig setfilterkey none`
+4. Troubleshoot with: `hiringconfig testfilter <text>`
 
 ## Supabase Setup
 

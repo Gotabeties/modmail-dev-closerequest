@@ -749,10 +749,10 @@ class Hiring(commands.Cog):
         await self.update_config()
         return True
 
-    async def _check_message_with_openai_moderation(
+    async def _run_openai_moderation(
         self,
         text: str,
-    ) -> Tuple[bool, Optional[bool], Optional[str]]:
+    ) -> Tuple[bool, Optional[Dict[str, Any]], Optional[str]]:
         api_url = str(self.config.get("openai_moderation_api_url") or "https://api.openai.com/v1/moderations").strip()
         model = str(self.config.get("openai_moderation_model") or "omni-moderation-latest").strip()
         api_key = str(self.config.get("openai_api_key") or "").strip()
@@ -808,11 +808,21 @@ class Hiring(commands.Cog):
         if not isinstance(first, dict):
             return False, None, "Moderation response results format is invalid."
 
-        flagged = first.get("flagged")
+        return True, first, None
+
+    async def _check_message_with_openai_moderation(
+        self,
+        text: str,
+    ) -> Tuple[bool, Optional[bool], Optional[str]]:
+        ok, first_result, error = await self._run_openai_moderation(text=text)
+        if not ok or first_result is None:
+            return False, None, error
+
+        flagged = first_result.get("flagged")
         if isinstance(flagged, bool):
             return True, flagged, None
 
-        categories = first.get("categories")
+        categories = first_result.get("categories")
         if isinstance(categories, dict):
             has_flag = any(bool(value) for value in categories.values() if isinstance(value, bool))
             return True, has_flag, None
@@ -1435,6 +1445,41 @@ class Hiring(commands.Cog):
         self.config["openai_api_key"] = cleaned
         await self.update_config()
         await ctx.send("✅ OpenAI API key saved for hiring content filter.")
+
+    @checks.has_permissions(PermissionLevel.ADMINISTRATOR)
+    @hiringconfig.command(name="testfilter")
+    async def hiringconfig_testfilter(self, ctx, *, text: str):
+        """Test the hiring content filter against OpenAI moderation and show debug details."""
+        value = text.strip()
+        if not value:
+            return await ctx.send("❌ Please provide text to test.")
+
+        ok, first_result, error = await self._run_openai_moderation(text=value)
+        if not ok or first_result is None:
+            return await ctx.send(f"❌ Filter test failed: {error or 'Unknown error'}")
+
+        flagged = first_result.get("flagged")
+        categories = first_result.get("categories") if isinstance(first_result.get("categories"), dict) else {}
+        flagged_categories = [name for name, state in categories.items() if isinstance(state, bool) and state]
+
+        embed = discord.Embed(
+            title="Hiring Filter Test Result",
+            color=self._post_color(),
+        )
+        embed.add_field(name="Flagged", value=str(bool(flagged)), inline=True)
+        embed.add_field(
+            name="Model",
+            value=str(self.config.get("openai_moderation_model") or "omni-moderation-latest"),
+            inline=True,
+        )
+        embed.add_field(
+            name="Categories",
+            value=", ".join(flagged_categories) if flagged_categories else "None",
+            inline=False,
+        )
+
+        embed = self._apply_configured_embed_image(embed)
+        await ctx.send(embed=embed)
 
     @checks.has_permissions(PermissionLevel.ADMINISTRATOR)
     @hiring_group.command(name="requestinfo")
