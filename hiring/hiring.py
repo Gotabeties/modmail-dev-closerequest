@@ -828,21 +828,9 @@ class Hiring(commands.Cog):
             return True, first, None, None, 200
 
         try:
-            ok, first, error, error_type, status_code = await request_model(model)
+            ok, first, error, _, _ = await request_model(model)
             if ok:
                 return True, first, None
-
-            should_fallback = (
-                model == "omni-moderation-latest"
-                and status_code == 429
-                and str(error_type or "").lower() == "invalid_request_error"
-            )
-            if should_fallback:
-                fallback_ok, fallback_first, fallback_error, _, _ = await request_model("text-moderation-latest")
-                if fallback_ok:
-                    return True, fallback_first, None
-
-                return False, None, f"{error} | fallback_failed={fallback_error}"
 
             return False, None, error
         except Exception as exc:
