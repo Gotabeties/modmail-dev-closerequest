@@ -764,22 +764,23 @@ class Hiring(commands.Cog):
             "Content-Type": "application/json",
             "Authorization": f"Bearer {api_key}",
         }
-        body: Dict[str, Any] = {
-            "model": model,
-            "input": text,
-        }
 
-        try:
+        async def request_model(model_name: str) -> Tuple[bool, Optional[Dict[str, Any]], Optional[str], Optional[str], Optional[int]]:
+            body: Dict[str, Any] = {
+                "model": model_name,
+                "input": text,
+            }
+
             timeout = aiohttp.ClientTimeout(total=10)
             async with aiohttp.ClientSession(timeout=timeout) as session:
                 async with session.post(api_url, json=body, headers=headers) as response:
                     if response.status != 200:
                         request_id = response.headers.get("x-request-id")
                         retry_after = response.headers.get("retry-after")
+                        error_type = None
+                        error_code = None
                         try:
                             error_data: Any = await response.json(content_type=None)
-                            error_type = None
-                            error_code = None
                             if isinstance(error_data, dict):
                                 error_obj = error_data.get("error")
                                 if isinstance(error_obj, dict):
@@ -804,28 +805,48 @@ class Hiring(commands.Cog):
                         if request_id:
                             details.append(f"request_id={request_id}")
 
-                        return False, None, " | ".join(details)
+                        return False, None, " | ".join(details), error_type, response.status
 
                     try:
                         data: Any = await response.json(content_type=None)
                     except Exception:
                         raw = await response.text()
-                        return False, None, f"Invalid JSON response: {raw[:200]}"
+                        return False, None, f"Invalid JSON response: {raw[:200]}", None, response.status
+
+            if not isinstance(data, dict):
+                return False, None, "Unexpected moderation API response format.", None, 200
+
+            results = data.get("results")
+            if not isinstance(results, list) or not results:
+                return False, None, "Moderation response missing results.", None, 200
+
+            first = results[0]
+            if not isinstance(first, dict):
+                return False, None, "Moderation response results format is invalid.", None, 200
+
+            first["_model_used"] = model_name
+            return True, first, None, None, 200
+
+        try:
+            ok, first, error, error_type, status_code = await request_model(model)
+            if ok:
+                return True, first, None
+
+            should_fallback = (
+                model == "omni-moderation-latest"
+                and status_code == 429
+                and str(error_type or "").lower() == "invalid_request_error"
+            )
+            if should_fallback:
+                fallback_ok, fallback_first, fallback_error, _, _ = await request_model("text-moderation-latest")
+                if fallback_ok:
+                    return True, fallback_first, None
+
+                return False, None, f"{error} | fallback_failed={fallback_error}"
+
+            return False, None, error
         except Exception as exc:
             return False, None, str(exc)
-
-        if not isinstance(data, dict):
-            return False, None, "Unexpected moderation API response format."
-
-        results = data.get("results")
-        if not isinstance(results, list) or not results:
-            return False, None, "Moderation response missing results."
-
-        first = results[0]
-        if not isinstance(first, dict):
-            return False, None, "Moderation response results format is invalid."
-
-        return True, first, None
 
     async def _check_message_with_openai_moderation(
         self,
@@ -1512,7 +1533,7 @@ class Hiring(commands.Cog):
         embed.add_field(name="Flagged", value=str(bool(flagged)), inline=True)
         embed.add_field(
             name="Model",
-            value=str(self.config.get("openai_moderation_model") or "omni-moderation-latest"),
+            value=str(first_result.get("_model_used") or self.config.get("openai_moderation_model") or "omni-moderation-latest"),
             inline=True,
         )
         embed.add_field(
