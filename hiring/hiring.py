@@ -774,12 +774,18 @@ class Hiring(commands.Cog):
             async with aiohttp.ClientSession(timeout=timeout) as session:
                 async with session.post(api_url, json=body, headers=headers) as response:
                     if response.status != 200:
+                        request_id = response.headers.get("x-request-id")
+                        retry_after = response.headers.get("retry-after")
                         try:
                             error_data: Any = await response.json(content_type=None)
+                            error_type = None
+                            error_code = None
                             if isinstance(error_data, dict):
                                 error_obj = error_data.get("error")
                                 if isinstance(error_obj, dict):
                                     error_message = str(error_obj.get("message") or error_obj.get("type") or "Unknown error")
+                                    error_type = str(error_obj.get("type") or "").strip() or None
+                                    error_code = str(error_obj.get("code") or "").strip() or None
                                 else:
                                     error_message = str(error_obj or "Unknown error")
                             else:
@@ -787,7 +793,18 @@ class Hiring(commands.Cog):
                         except Exception:
                             body_text = await response.text()
                             error_message = body_text[:200]
-                        return False, None, f"HTTP {response.status}: {error_message}"
+
+                        details: List[str] = [f"HTTP {response.status}: {error_message}"]
+                        if error_type:
+                            details.append(f"type={error_type}")
+                        if error_code:
+                            details.append(f"code={error_code}")
+                        if retry_after:
+                            details.append(f"retry_after={retry_after}s")
+                        if request_id:
+                            details.append(f"request_id={request_id}")
+
+                        return False, None, " | ".join(details)
 
                     try:
                         data: Any = await response.json(content_type=None)
@@ -1444,6 +1461,11 @@ class Hiring(commands.Cog):
 
         self.config["openai_api_key"] = cleaned
         await self.update_config()
+        if not cleaned.startswith("sk-"):
+            return await ctx.send(
+                "⚠️ Key saved, but it does not start with `sk-`. Make sure this is an OpenAI API key from platform.openai.com, not a ChatGPT session token."
+            )
+
         await ctx.send("✅ OpenAI API key saved for hiring content filter.")
 
     @checks.has_permissions(PermissionLevel.ADMINISTRATOR)
@@ -1456,7 +1478,28 @@ class Hiring(commands.Cog):
 
         ok, first_result, error = await self._run_openai_moderation(text=value)
         if not ok or first_result is None:
-            return await ctx.send(f"❌ Filter test failed: {error or 'Unknown error'}")
+            error_text = str(error or "Unknown error")
+            hints: List[str] = []
+            lowered = error_text.lower()
+
+            if "http 401" in lowered:
+                hints.append("Check `hiringconfig setfilterkey` and confirm it is a valid OpenAI API key.")
+            if "http 429" in lowered:
+                hints.append("429 usually means project rate-limit or quota/billing limits, not Discord-side spam.")
+            if "insufficient_quota" in lowered or "quota" in lowered:
+                hints.append("Enable billing / increase project quota in OpenAI platform settings.")
+            if "does not start with `sk-`" in lowered or "session token" in lowered:
+                hints.append("Use a real API key from platform.openai.com (starts with `sk-`).")
+
+            if hints:
+                return await ctx.send(
+                    "❌ Filter test failed: "
+                    + error_text
+                    + "\n\n"
+                    + "\n".join(f"• {item}" for item in hints)
+                )
+
+            return await ctx.send(f"❌ Filter test failed: {error_text}")
 
         flagged = first_result.get("flagged")
         categories = first_result.get("categories") if isinstance(first_result.get("categories"), dict) else {}
