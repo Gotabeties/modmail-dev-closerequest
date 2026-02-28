@@ -15,6 +15,8 @@ Panel setup commands:
 - `hiringconfig sendpanel`
 - `hiringconfig setoutputchannel <#channel>`
 - `hiringconfig usepaneloutput <true|false>`
+- `hiringconfig filter <true|false>`
+- `hiringconfig setfilterkey <moderate_api_key>`
 - `hiring setembedtitle <title>`
 - `hiringconfig setmenubuttoncolor` (aliases: `setbuttoncolor`, `buttoncolor`)
 - `hiringconfig setembedimage <image_url|none>`
@@ -23,6 +25,14 @@ Panel setup commands:
 - `hiring relistactive`
 
 `hiring setembedtitle` updates the panel/menu embed title.
+
+## Content Filter Setup (ModerateAPI)
+
+The hiring content filter uses ModerateAPI (`https://moderateapi.com/api/v1/moderate`).
+
+1. Enable the filter: `hiringconfig filter true`
+2. Set your API key: `hiringconfig setfilterkey <moderate_api_key>`
+3. Optional: clear saved key with `hiringconfig setfilterkey none`
 
 ## Supabase Setup
 

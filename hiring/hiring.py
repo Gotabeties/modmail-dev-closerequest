@@ -126,6 +126,12 @@ class HiringSubmissionModal(discord.ui.Modal, title="Hiring Submission"):
 
         moderation_result = await self.cog.validate_hiring_content(base_payload)
         if moderation_result:
+            if moderation_result.get("type") == "not_configured":
+                return await interaction.followup.send(
+                    "❌ Hiring content filter is enabled but not configured. Ask an admin to run `hiringconfig setfilterkey <api_key>`.",
+                    ephemeral=True,
+                )
+
             if moderation_result.get("type") == "api_error":
                 return await interaction.followup.send(
                     "❌ Content filter is temporarily unavailable. Please try again in a moment.",
@@ -513,7 +519,8 @@ class Hiring(commands.Cog):
             "output_channel_id": None,
             "use_panel_channel_for_output": False,
             "content_filter_enabled": True,
-            "profanity_api_url": "https://vector.profanity.dev",
+            "moderate_api_base_url": "https://moderateapi.com/api/v1",
+            "moderate_api_key": None,
             "banned_user_ids": [],
             "auto_delete_enabled": True,
             "auto_delete_days": 14,
@@ -737,21 +744,38 @@ class Hiring(commands.Cog):
         await self.update_config()
         return True
 
-    async def _check_message_with_profanity_api(self, message: str) -> Tuple[bool, Optional[bool], Optional[str]]:
-        api_url = str(self.config.get("profanity_api_url") or "https://vector.profanity.dev").strip()
-        if not api_url:
-            return False, None, "Profanity API URL is not configured."
+    async def _check_message_with_moderate_api(
+        self,
+        text: str,
+        context: Optional[str] = None,
+    ) -> Tuple[bool, Optional[bool], Optional[str]]:
+        base_url = str(self.config.get("moderate_api_base_url") or "https://moderateapi.com/api/v1").strip().rstrip("/")
+        api_key = str(self.config.get("moderate_api_key") or "").strip()
 
-        headers = {"Content-Type": "application/json"}
-        body = {"message": message}
+        if not api_key:
+            return False, None, "ModerateAPI key is not configured."
+
+        api_url = f"{base_url}/moderate"
+        headers = {
+            "Content-Type": "application/json",
+            "X-API-Key": api_key,
+        }
+        body: Dict[str, Any] = {"text": text}
+        if context:
+            body["context"] = context
 
         try:
             timeout = aiohttp.ClientTimeout(total=10)
             async with aiohttp.ClientSession(timeout=timeout) as session:
                 async with session.post(api_url, json=body, headers=headers) as response:
                     if response.status != 200:
-                        body_text = await response.text()
-                        return False, None, f"HTTP {response.status}: {body_text[:200]}"
+                        try:
+                            error_data: Any = await response.json(content_type=None)
+                            error_message = str(error_data.get("error") or "Unknown error") if isinstance(error_data, dict) else "Unknown error"
+                        except Exception:
+                            body_text = await response.text()
+                            error_message = body_text[:200]
+                        return False, None, f"HTTP {response.status}: {error_message}"
 
                     try:
                         data: Any = await response.json(content_type=None)
@@ -761,39 +785,23 @@ class Hiring(commands.Cog):
         except Exception as exc:
             return False, None, str(exc)
 
-        def find_boolean_flag(obj: Any) -> Optional[bool]:
-            if isinstance(obj, dict):
-                for key in (
-                    "isProfanity",
-                    "is_profanity",
-                    "profanity",
-                    "isProfane",
-                    "is_profane",
-                    "containsProfanity",
-                    "contains_profanity",
-                    "flagged",
-                ):
-                    value = obj.get(key)
-                    if isinstance(value, bool):
-                        return value
+        if not isinstance(data, dict):
+            return False, None, "Unexpected ModerateAPI response format."
 
-                for key in ("result", "data"):
-                    nested = obj.get(key)
-                    found = find_boolean_flag(nested)
-                    if isinstance(found, bool):
-                        return found
+        safe_value = data.get("safe")
+        if isinstance(safe_value, bool):
+            return True, not safe_value, None
 
-                matches = obj.get("matches")
-                if isinstance(matches, list):
-                    return len(matches) > 0
+        suggested_action = str(data.get("suggested_action") or "").strip().lower()
+        if suggested_action:
+            blocked_actions = {"reject", "block", "deny", "remove"}
+            approved_actions = {"approve", "allow", "pass"}
+            if suggested_action in blocked_actions:
+                return True, True, None
+            if suggested_action in approved_actions:
+                return True, False, None
 
-            return None
-
-        profanity_detected = find_boolean_flag(data)
-        if profanity_detected is None:
-            return False, None, "Unexpected profanity API response format."
-
-        return True, profanity_detected, None
+        return False, None, "Unexpected ModerateAPI response format."
 
     async def validate_hiring_content(self, payload: Dict) -> Optional[Dict[str, str]]:
         if not self.config.get("content_filter_enabled", True):
@@ -809,11 +817,16 @@ class Hiring(commands.Cog):
             if not value.strip():
                 continue
 
-            ok, profanity_detected, error = await self._check_message_with_profanity_api(value)
+            ok, blocked, error = await self._check_message_with_moderate_api(
+                text=value,
+                context=f"hiring_{field_name.lower().replace(' ', '_')}",
+            )
             if not ok:
-                return {"type": "api_error", "error": str(error or "Unknown profanity API error")}
+                if error and "not configured" in str(error).lower():
+                    return {"type": "not_configured", "error": str(error)}
+                return {"type": "api_error", "error": str(error or "Unknown content filter API error")}
 
-            if profanity_detected:
+            if blocked:
                 return {"type": "blocked", "field": field_name}
 
         return None
@@ -1394,16 +1407,21 @@ class Hiring(commands.Cog):
         )
 
     @checks.has_permissions(PermissionLevel.ADMINISTRATOR)
-    @hiringconfig.command(name="setfilterapi")
-    async def hiringconfig_setfilterapi(self, ctx, url: str):
-        """Set the API URL used for hiring profanity filtering."""
-        cleaned = url.strip()
-        if not cleaned.startswith(("https://", "http://")):
-            return await ctx.send("❌ API URL must start with http:// or https://")
+    @hiringconfig.command(name="setfilterkey", aliases=["setmoderateapikey", "setapikey"])
+    async def hiringconfig_setfilterkey(self, ctx, *, api_key: str):
+        """Set the ModerateAPI key used for hiring content filtering. Use 'none' to clear."""
+        cleaned = api_key.strip()
+        if not cleaned:
+            return await ctx.send("❌ API key cannot be empty.")
 
-        self.config["profanity_api_url"] = cleaned.rstrip("/")
+        if cleaned.lower() in {"none", "off", "disable", "disabled", "remove", "null", "clear"}:
+            self.config["moderate_api_key"] = None
+            await self.update_config()
+            return await ctx.send("✅ Cleared ModerateAPI key for hiring content filter.")
+
+        self.config["moderate_api_key"] = cleaned
         await self.update_config()
-        await ctx.send(f"✅ Hiring content filter API URL set to: {self.config['profanity_api_url']}")
+        await ctx.send("✅ ModerateAPI key saved for hiring content filter.")
 
     @checks.has_permissions(PermissionLevel.ADMINISTRATOR)
     @hiring_group.command(name="requestinfo")
@@ -1670,7 +1688,12 @@ class Hiring(commands.Cog):
         )
         embed.add_field(
             name="Filter API URL",
-            value=(self.config.get("profanity_api_url") or "https://vector.profanity.dev")[:1024],
+            value=(self.config.get("moderate_api_base_url") or "https://moderateapi.com/api/v1")[:1024],
+            inline=True,
+        )
+        embed.add_field(
+            name="Filter API Key",
+            value="Configured" if self.config.get("moderate_api_key") else "Not set",
             inline=True,
         )
         embed.add_field(
