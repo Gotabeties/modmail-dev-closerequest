@@ -128,7 +128,7 @@ class HiringSubmissionModal(discord.ui.Modal, title="Hiring Submission"):
         if moderation_result:
             if moderation_result.get("type") == "not_configured":
                 return await interaction.followup.send(
-                    "❌ Hiring content filter is enabled but not configured. Ask an admin to run `hiringconfig setfilterkey <api_key>`.",
+                    "❌ Hiring content filter is enabled but not configured. Ask an admin to run `hiringconfig setfilterkey <openai_api_key>`.",
                     ephemeral=True,
                 )
 
@@ -519,8 +519,9 @@ class Hiring(commands.Cog):
             "output_channel_id": None,
             "use_panel_channel_for_output": False,
             "content_filter_enabled": True,
-            "moderate_api_base_url": "https://moderateapi.com/api/v1",
-            "moderate_api_key": None,
+            "openai_moderation_api_url": "https://api.openai.com/v1/moderations",
+            "openai_moderation_model": "omni-moderation-latest",
+            "openai_api_key": None,
             "banned_user_ids": [],
             "auto_delete_enabled": True,
             "auto_delete_days": 14,
@@ -541,6 +542,10 @@ class Hiring(commands.Cog):
         if missing:
             for key in missing:
                 self.config[key] = self.default_config[key]
+            await self.update_config()
+
+        if self.config.get("moderate_api_key") and not self.config.get("openai_api_key"):
+            self.config["openai_api_key"] = self.config.get("moderate_api_key")
             await self.update_config()
 
         message_map_doc = await self.db.find_one({"_id": "hiring-request-message-map"})
@@ -744,25 +749,25 @@ class Hiring(commands.Cog):
         await self.update_config()
         return True
 
-    async def _check_message_with_moderate_api(
+    async def _check_message_with_openai_moderation(
         self,
         text: str,
-        context: Optional[str] = None,
     ) -> Tuple[bool, Optional[bool], Optional[str]]:
-        base_url = str(self.config.get("moderate_api_base_url") or "https://moderateapi.com/api/v1").strip().rstrip("/")
-        api_key = str(self.config.get("moderate_api_key") or "").strip()
+        api_url = str(self.config.get("openai_moderation_api_url") or "https://api.openai.com/v1/moderations").strip()
+        model = str(self.config.get("openai_moderation_model") or "omni-moderation-latest").strip()
+        api_key = str(self.config.get("openai_api_key") or "").strip()
 
         if not api_key:
-            return False, None, "ModerateAPI key is not configured."
+            return False, None, "OpenAI API key is not configured."
 
-        api_url = f"{base_url}/moderate"
         headers = {
             "Content-Type": "application/json",
-            "X-API-Key": api_key,
+            "Authorization": f"Bearer {api_key}",
         }
-        body: Dict[str, Any] = {"text": text}
-        if context:
-            body["context"] = context
+        body: Dict[str, Any] = {
+            "model": model,
+            "input": text,
+        }
 
         try:
             timeout = aiohttp.ClientTimeout(total=10)
@@ -771,7 +776,14 @@ class Hiring(commands.Cog):
                     if response.status != 200:
                         try:
                             error_data: Any = await response.json(content_type=None)
-                            error_message = str(error_data.get("error") or "Unknown error") if isinstance(error_data, dict) else "Unknown error"
+                            if isinstance(error_data, dict):
+                                error_obj = error_data.get("error")
+                                if isinstance(error_obj, dict):
+                                    error_message = str(error_obj.get("message") or error_obj.get("type") or "Unknown error")
+                                else:
+                                    error_message = str(error_obj or "Unknown error")
+                            else:
+                                error_message = "Unknown error"
                         except Exception:
                             body_text = await response.text()
                             error_message = body_text[:200]
@@ -786,22 +798,26 @@ class Hiring(commands.Cog):
             return False, None, str(exc)
 
         if not isinstance(data, dict):
-            return False, None, "Unexpected ModerateAPI response format."
+            return False, None, "Unexpected moderation API response format."
 
-        safe_value = data.get("safe")
-        if isinstance(safe_value, bool):
-            return True, not safe_value, None
+        results = data.get("results")
+        if not isinstance(results, list) or not results:
+            return False, None, "Moderation response missing results."
 
-        suggested_action = str(data.get("suggested_action") or "").strip().lower()
-        if suggested_action:
-            blocked_actions = {"reject", "block", "deny", "remove"}
-            approved_actions = {"approve", "allow", "pass"}
-            if suggested_action in blocked_actions:
-                return True, True, None
-            if suggested_action in approved_actions:
-                return True, False, None
+        first = results[0]
+        if not isinstance(first, dict):
+            return False, None, "Moderation response results format is invalid."
 
-        return False, None, "Unexpected ModerateAPI response format."
+        flagged = first.get("flagged")
+        if isinstance(flagged, bool):
+            return True, flagged, None
+
+        categories = first.get("categories")
+        if isinstance(categories, dict):
+            has_flag = any(bool(value) for value in categories.values() if isinstance(value, bool))
+            return True, has_flag, None
+
+        return False, None, "Unexpected moderation API response format."
 
     async def validate_hiring_content(self, payload: Dict) -> Optional[Dict[str, str]]:
         if not self.config.get("content_filter_enabled", True):
@@ -817,10 +833,7 @@ class Hiring(commands.Cog):
             if not value.strip():
                 continue
 
-            ok, blocked, error = await self._check_message_with_moderate_api(
-                text=value,
-                context=f"hiring_{field_name.lower().replace(' ', '_')}",
-            )
+            ok, blocked, error = await self._check_message_with_openai_moderation(text=value)
             if not ok:
                 if error and "not configured" in str(error).lower():
                     return {"type": "not_configured", "error": str(error)}
@@ -1407,21 +1420,21 @@ class Hiring(commands.Cog):
         )
 
     @checks.has_permissions(PermissionLevel.ADMINISTRATOR)
-    @hiringconfig.command(name="setfilterkey", aliases=["setmoderateapikey", "setapikey"])
+    @hiringconfig.command(name="setfilterkey", aliases=["setopenaikey", "setmoderateapikey", "setapikey"])
     async def hiringconfig_setfilterkey(self, ctx, *, api_key: str):
-        """Set the ModerateAPI key used for hiring content filtering. Use 'none' to clear."""
+        """Set the OpenAI API key used for hiring content filtering. Use 'none' to clear."""
         cleaned = api_key.strip()
         if not cleaned:
             return await ctx.send("❌ API key cannot be empty.")
 
         if cleaned.lower() in {"none", "off", "disable", "disabled", "remove", "null", "clear"}:
-            self.config["moderate_api_key"] = None
+            self.config["openai_api_key"] = None
             await self.update_config()
-            return await ctx.send("✅ Cleared ModerateAPI key for hiring content filter.")
+            return await ctx.send("✅ Cleared OpenAI API key for hiring content filter.")
 
-        self.config["moderate_api_key"] = cleaned
+        self.config["openai_api_key"] = cleaned
         await self.update_config()
-        await ctx.send("✅ ModerateAPI key saved for hiring content filter.")
+        await ctx.send("✅ OpenAI API key saved for hiring content filter.")
 
     @checks.has_permissions(PermissionLevel.ADMINISTRATOR)
     @hiring_group.command(name="requestinfo")
@@ -1688,12 +1701,12 @@ class Hiring(commands.Cog):
         )
         embed.add_field(
             name="Filter API URL",
-            value=(self.config.get("moderate_api_base_url") or "https://moderateapi.com/api/v1")[:1024],
+            value=(self.config.get("openai_moderation_api_url") or "https://api.openai.com/v1/moderations")[:1024],
             inline=True,
         )
         embed.add_field(
             name="Filter API Key",
-            value="Configured" if self.config.get("moderate_api_key") else "Not set",
+            value="Configured" if self.config.get("openai_api_key") else "Not set",
             inline=True,
         )
         embed.add_field(
