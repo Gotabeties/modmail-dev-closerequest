@@ -1,6 +1,6 @@
-import re
+from collections import OrderedDict
+from datetime import datetime, timezone
 
-import discord
 from discord.ext import commands
 
 from core.models import PermissionLevel
@@ -9,45 +9,20 @@ from core.models import PermissionLevel
 class Claim(commands.Cog):
     """Allow supporters to claim and unclaim modmail tickets."""
 
-    # Claim suffix is always prefixed with "c-" to distinguish from ticket numbers
-    CLAIM_TAG = "c-"
-    CLAIM_SUFFIX_PATTERN = re.compile(r"^(?P<base>.+)-c-(?P<suffix>[a-z0-9]{1,5})$")
-
     def __init__(self, bot):
         self.bot = bot
-        self._processed_messages = set()
+        self.db = bot.plugin_db.get_partition(self)
+        self._processed_messages = OrderedDict()
 
     def _dedup(self, message_id: int) -> bool:
-        """Return True if this message was already processed (duplicate). False if new."""
+        """Return True if this message was already processed."""
         if message_id in self._processed_messages:
             return True
-        self._processed_messages.add(message_id)
-        # Keep set small
+
+        self._processed_messages[message_id] = True
         if len(self._processed_messages) > 200:
-            keep = list(self._processed_messages)[-100:]
-            self._processed_messages = set(keep)
+            self._processed_messages.popitem(last=False)
         return False
-
-    @staticmethod
-    def _supporter_suffix(name: str) -> str:
-        """First 5 alphanumeric chars of the supporter's name, lowercased."""
-        cleaned = re.sub(r"[^a-z0-9]", "", str(name).lower())
-        return cleaned[:5] or "staff"
-
-    @classmethod
-    def _split_claimed_name(cls, channel_name: str):
-        """Split a claimed channel name into (base, suffix) or (full_name, None)."""
-        match = cls.CLAIM_SUFFIX_PATTERN.fullmatch(channel_name)
-        if not match:
-            return channel_name, None
-        return match.group("base"), match.group("suffix")
-
-    @classmethod
-    def _build_claimed_name(cls, channel_name: str, supporter_name: str) -> str:
-        suffix = cls._supporter_suffix(supporter_name)
-        tag = f"-{cls.CLAIM_TAG}{suffix}"
-        max_base = 100 - len(tag)
-        return f"{channel_name[:max_base]}{tag}"
 
     async def _check_permissions(self, ctx) -> bool:
         try:
@@ -61,9 +36,45 @@ class Claim(commands.Cog):
         await ctx.send("❌ You need to be a supporter to use this command.")
         return False
 
+    async def _get_claim_record(self, thread_id: int):
+        record = await self.db.find_one({"_id": f"claim:{int(thread_id)}"})
+        if record and record.get("active"):
+            return record
+        return None
+
+    async def _set_claim_record(self, ctx, thread):
+        await self.db.find_one_and_update(
+            {"_id": f"claim:{int(thread.id)}"},
+            {
+                "$set": {
+                    "thread_id": int(thread.id),
+                    "channel_id": int(ctx.channel.id),
+                    "guild_id": int(ctx.guild.id) if ctx.guild else None,
+                    "claimer_id": int(ctx.author.id),
+                    "claimer_name": str(ctx.author),
+                    "claimer_mention": getattr(ctx.author, "mention", str(ctx.author)),
+                    "claimed_at": datetime.now(timezone.utc).isoformat(),
+                    "active": True,
+                }
+            },
+            upsert=True,
+        )
+
+    async def _clear_claim_record(self, thread_id: int):
+        await self.db.find_one_and_update(
+            {"_id": f"claim:{int(thread_id)}"},
+            {
+                "$set": {
+                    "active": False,
+                    "unclaimed_at": datetime.now(timezone.utc).isoformat(),
+                }
+            },
+            upsert=True,
+        )
+
     @commands.command(name="claim")
     async def claim(self, ctx):
-        """Claim the current ticket. Appends your name tag to the channel."""
+        """Claim the current ticket."""
         if self._dedup(ctx.message.id):
             return
 
@@ -76,35 +87,24 @@ class Claim(commands.Cog):
                 await ctx.send("❌ This command can only be used inside a ticket.")
                 return
 
-            channel = ctx.channel
-            _, current_suffix = self._split_claimed_name(channel.name)
-            supporter_suffix = self._supporter_suffix(ctx.author.name)
-
-            if current_suffix is not None:
-                if current_suffix == supporter_suffix:
+            record = await self._get_claim_record(thread.id)
+            if record is not None:
+                current_claimer_id = int(record.get("claimer_id", 0))
+                if current_claimer_id == ctx.author.id:
                     await ctx.send("ℹ️ This ticket is already claimed by you.")
                 else:
-                    await ctx.send("❌ This ticket is already claimed by someone else.")
+                    current_name = record.get("claimer_mention") or record.get("claimer_name") or "someone else"
+                    await ctx.send(f"❌ This ticket is already claimed by {current_name}.")
                 return
 
-            new_name = self._build_claimed_name(channel.name, ctx.author.name)
-
-            try:
-                await channel.edit(name=new_name, reason=f"Ticket claimed by {ctx.author}")
-            except discord.Forbidden:
-                await ctx.send("❌ I do not have permission to rename this ticket.")
-                return
-            except discord.HTTPException as e:
-                await ctx.send(f"❌ Could not rename this ticket: {e}")
-                return
-
+            await self._set_claim_record(ctx, thread)
             await ctx.send(f"✅ {ctx.author.mention} claimed this ticket.")
         except Exception as error:
             await ctx.send(f"❌ Claim failed: {type(error).__name__}: {error}")
 
     @commands.command(name="unclaim")
     async def unclaim(self, ctx):
-        """Unclaim the current ticket. Removes the claim tag from the channel name."""
+        """Unclaim the current ticket."""
         if self._dedup(ctx.message.id):
             return
 
@@ -117,29 +117,19 @@ class Claim(commands.Cog):
                 await ctx.send("❌ This command can only be used inside a ticket.")
                 return
 
-            channel = ctx.channel
-            base_name, current_suffix = self._split_claimed_name(channel.name)
-
-            if current_suffix is None:
+            record = await self._get_claim_record(thread.id)
+            if record is None:
                 await ctx.send("ℹ️ This ticket is not claimed.")
                 return
 
-            supporter_suffix = self._supporter_suffix(ctx.author.name)
-            is_admin = getattr(ctx.author.guild_permissions, "administrator", False)
+            current_claimer_id = int(record.get("claimer_id", 0))
+            is_admin = getattr(getattr(ctx.author, "guild_permissions", None), "administrator", False)
 
-            if current_suffix != supporter_suffix and not is_admin:
+            if current_claimer_id != ctx.author.id and not is_admin:
                 await ctx.send("❌ Only the supporter who claimed this ticket or an admin can unclaim it.")
                 return
 
-            try:
-                await channel.edit(name=base_name, reason=f"Ticket unclaimed by {ctx.author}")
-            except discord.Forbidden:
-                await ctx.send("❌ I do not have permission to rename this ticket.")
-                return
-            except discord.HTTPException as e:
-                await ctx.send(f"❌ Could not rename this ticket: {e}")
-                return
-
+            await self._clear_claim_record(thread.id)
             await ctx.send("✅ This ticket has been unclaimed.")
         except Exception as error:
             await ctx.send(f"❌ Unclaim failed: {type(error).__name__}: {error}")
