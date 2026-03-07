@@ -113,43 +113,46 @@ class Claim(commands.Cog):
     @commands.command(name="claim")
     async def claim(self, ctx):
         """Claim the current ticket."""
-        channel = await self._get_ticket_channel(ctx)
-
-        if channel is None:
-            await ctx.send("❌ Could not find the ticket channel.")
-            return
-
-        channel, current_base_name, current_suffix = await self._get_claim_state(channel, retries=1, delay=0.35)
-        supporter_suffix = self._supporter_suffix(ctx.author.name)
-
-        if current_suffix is not None:
-            if current_suffix == supporter_suffix:
-                await ctx.send("ℹ️ This ticket is already claimed by you.")
-            else:
-                await ctx.send("❌ This ticket is already claimed.")
-            return
-
-        new_name = self._build_claimed_name(current_base_name, ctx.author.name)
-
         try:
-            await channel.edit(name=new_name, reason=f"Ticket claimed by {ctx.author}")
-        except discord.Forbidden:
-            await ctx.send("❌ I do not have permission to rename this ticket.")
-            return
-        except discord.HTTPException:
-            await ctx.send("❌ I could not rename this ticket right now.")
-            return
+            channel = await self._get_ticket_channel(ctx)
 
-        self._remember_claim(channel.id, current_base_name, supporter_suffix)
+            if channel is None:
+                await ctx.send("❌ Could not find the ticket channel.")
+                return
 
-        channel, _, updated_suffix = await self._get_claim_state(channel, retries=4, delay=0.4)
-        if updated_suffix != supporter_suffix:
-            await ctx.send(
-                f"❌ I tried to claim this ticket, but Discord did not keep the rename. Current channel name: `{channel.name}`"
-            )
-            return
+            channel, current_base_name, current_suffix = await self._get_claim_state(channel, retries=1, delay=0.35)
+            supporter_suffix = self._supporter_suffix(ctx.author.name)
 
-        await ctx.send(f"✅ {ctx.author.mention} claimed this ticket.")
+            if current_suffix is not None:
+                if current_suffix == supporter_suffix:
+                    await ctx.send("ℹ️ This ticket is already claimed by you.")
+                else:
+                    await ctx.send("❌ This ticket is already claimed.")
+                return
+
+            new_name = self._build_claimed_name(current_base_name, ctx.author.name)
+
+            try:
+                await channel.edit(name=new_name, reason=f"Ticket claimed by {ctx.author}")
+            except discord.Forbidden:
+                await ctx.send("❌ I do not have permission to rename this ticket.")
+                return
+            except discord.HTTPException:
+                await ctx.send("❌ I could not rename this ticket right now.")
+                return
+
+            self._remember_claim(channel.id, current_base_name, supporter_suffix)
+
+            channel, _, updated_suffix = await self._get_claim_state(channel, retries=4, delay=0.4)
+            if updated_suffix != supporter_suffix:
+                await ctx.send(
+                    f"❌ I tried to claim this ticket, but Discord did not keep the rename. Current channel name: `{channel.name}`"
+                )
+                return
+
+            await ctx.send(f"✅ {ctx.author.mention} claimed this ticket.")
+        except Exception as error:
+            await ctx.send(f"❌ Claim failed: {type(error).__name__}: {error}")
 
     @claim.error
     async def claim_error(self, ctx, error):
@@ -157,50 +160,54 @@ class Claim(commands.Cog):
             await ctx.send("❌ You can only use `claim` inside a ticket, and you must be a supporter.")
             return
 
-        raise error
+        await ctx.send(f"❌ Claim command error: {type(error).__name__}: {error}")
+        return
 
     @checks.has_permissions(PermissionLevel.SUPPORTER)
     @checks.thread_only()
     @commands.command(name="unclaim")
     async def unclaim(self, ctx):
         """Unclaim the current ticket."""
-        channel = await self._get_ticket_channel(ctx)
-
-        if channel is None:
-            await ctx.send("❌ Could not find the ticket channel.")
-            return
-
-        channel, base_name, current_suffix = await self._get_claim_state(channel, retries=4, delay=0.4)
-        if current_suffix is None:
-            await ctx.send("ℹ️ This ticket is not claimed.")
-            return
-
-        supporter_suffix = self._supporter_suffix(ctx.author.name)
-        is_admin = getattr(ctx.author.guild_permissions, "administrator", False)
-
-        if current_suffix != supporter_suffix and not is_admin:
-            await ctx.send("❌ Only the supporter who claimed this ticket or an admin can unclaim it.")
-            return
-
         try:
-            await channel.edit(name=base_name, reason=f"Ticket unclaimed by {ctx.author}")
-        except discord.Forbidden:
-            await ctx.send("❌ I do not have permission to rename this ticket.")
-            return
-        except discord.HTTPException:
-            await ctx.send("❌ I could not rename this ticket right now.")
-            return
+            channel = await self._get_ticket_channel(ctx)
 
-        self._clear_claim(channel.id)
+            if channel is None:
+                await ctx.send("❌ Could not find the ticket channel.")
+                return
 
-        channel, _, updated_suffix = await self._get_claim_state(channel, retries=4, delay=0.4)
-        if updated_suffix is not None:
-            await ctx.send(
-                f"❌ I tried to unclaim this ticket, but Discord did not keep the rename. Current channel name: `{channel.name}`"
-            )
-            return
+            channel, base_name, current_suffix = await self._get_claim_state(channel, retries=4, delay=0.4)
+            if current_suffix is None:
+                await ctx.send("ℹ️ This ticket is not claimed.")
+                return
 
-        await ctx.send("✅ This ticket has been unclaimed.")
+            supporter_suffix = self._supporter_suffix(ctx.author.name)
+            is_admin = getattr(ctx.author.guild_permissions, "administrator", False)
+
+            if current_suffix != supporter_suffix and not is_admin:
+                await ctx.send("❌ Only the supporter who claimed this ticket or an admin can unclaim it.")
+                return
+
+            try:
+                await channel.edit(name=base_name, reason=f"Ticket unclaimed by {ctx.author}")
+            except discord.Forbidden:
+                await ctx.send("❌ I do not have permission to rename this ticket.")
+                return
+            except discord.HTTPException:
+                await ctx.send("❌ I could not rename this ticket right now.")
+                return
+
+            self._clear_claim(channel.id)
+
+            channel, _, updated_suffix = await self._get_claim_state(channel, retries=4, delay=0.4)
+            if updated_suffix is not None:
+                await ctx.send(
+                    f"❌ I tried to unclaim this ticket, but Discord did not keep the rename. Current channel name: `{channel.name}`"
+                )
+                return
+
+            await ctx.send("✅ This ticket has been unclaimed.")
+        except Exception as error:
+            await ctx.send(f"❌ Unclaim failed: {type(error).__name__}: {error}")
 
     @unclaim.error
     async def unclaim_error(self, ctx, error):
@@ -208,7 +215,8 @@ class Claim(commands.Cog):
             await ctx.send("❌ You can only use `unclaim` inside a ticket, and you must be a supporter or admin.")
             return
 
-        raise error
+        await ctx.send(f"❌ Unclaim command error: {type(error).__name__}: {error}")
+        return
 
 
 async def setup(bot):
