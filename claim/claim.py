@@ -1,3 +1,4 @@
+import asyncio
 import re
 
 import discord
@@ -14,6 +15,7 @@ class Claim(commands.Cog):
 
     def __init__(self, bot):
         self.bot = bot
+        self.claim_cache = {}
 
     async def _get_ticket_channel(self, ctx):
         channel = getattr(ctx, "channel", None)
@@ -54,6 +56,39 @@ class Claim(commands.Cog):
 
         return channel
 
+    def _remember_claim(self, channel_id: int, base_name: str, suffix: str):
+        self.claim_cache[int(channel_id)] = {
+            "base_name": base_name,
+            "suffix": suffix,
+        }
+
+    def _clear_claim(self, channel_id: int):
+        self.claim_cache.pop(int(channel_id), None)
+
+    def _get_cached_claim(self, channel_id: int):
+        return self.claim_cache.get(int(channel_id))
+
+    async def _get_claim_state(self, channel, *, retries: int = 3, delay: float = 0.5):
+        current_channel = channel
+
+        for attempt in range(retries + 1):
+            base_name, suffix = self._split_claimed_name(current_channel.name)
+            if suffix is not None:
+                self._remember_claim(current_channel.id, base_name, suffix)
+                return current_channel, base_name, suffix
+
+            cached = self._get_cached_claim(current_channel.id)
+            if cached is not None:
+                return current_channel, cached["base_name"], cached["suffix"]
+
+            if attempt >= retries:
+                break
+
+            await asyncio.sleep(delay)
+            current_channel = await self._refresh_channel(current_channel)
+
+        return current_channel, current_channel.name, None
+
     @staticmethod
     def _supporter_suffix(name: str) -> str:
         cleaned = re.sub(r"[^a-z0-9]", "", str(name).lower())
@@ -84,7 +119,7 @@ class Claim(commands.Cog):
             await ctx.send("❌ Could not find the ticket channel.")
             return
 
-        _, current_suffix = self._split_claimed_name(channel.name)
+        channel, current_base_name, current_suffix = await self._get_claim_state(channel, retries=1, delay=0.35)
         supporter_suffix = self._supporter_suffix(ctx.author.name)
 
         if current_suffix is not None:
@@ -94,7 +129,7 @@ class Claim(commands.Cog):
                 await ctx.send("❌ This ticket is already claimed.")
             return
 
-        new_name = self._build_claimed_name(channel.name, ctx.author.name)
+        new_name = self._build_claimed_name(current_base_name, ctx.author.name)
 
         try:
             await channel.edit(name=new_name, reason=f"Ticket claimed by {ctx.author}")
@@ -105,8 +140,9 @@ class Claim(commands.Cog):
             await ctx.send("❌ I could not rename this ticket right now.")
             return
 
-        channel = await self._refresh_channel(channel)
-        _, updated_suffix = self._split_claimed_name(channel.name)
+        self._remember_claim(channel.id, current_base_name, supporter_suffix)
+
+        channel, _, updated_suffix = await self._get_claim_state(channel, retries=4, delay=0.4)
         if updated_suffix != supporter_suffix:
             await ctx.send(
                 f"❌ I tried to claim this ticket, but Discord did not keep the rename. Current channel name: `{channel.name}`"
@@ -126,7 +162,7 @@ class Claim(commands.Cog):
             await ctx.send("❌ Could not find the ticket channel.")
             return
 
-        base_name, current_suffix = self._split_claimed_name(channel.name)
+        channel, base_name, current_suffix = await self._get_claim_state(channel, retries=4, delay=0.4)
         if current_suffix is None:
             await ctx.send("ℹ️ This ticket is not claimed.")
             return
@@ -147,8 +183,9 @@ class Claim(commands.Cog):
             await ctx.send("❌ I could not rename this ticket right now.")
             return
 
-        channel = await self._refresh_channel(channel)
-        _, updated_suffix = self._split_claimed_name(channel.name)
+        self._clear_claim(channel.id)
+
+        channel, _, updated_suffix = await self._get_claim_state(channel, retries=4, delay=0.4)
         if updated_suffix is not None:
             await ctx.send(
                 f"❌ I tried to unclaim this ticket, but Discord did not keep the rename. Current channel name: `{channel.name}`"
