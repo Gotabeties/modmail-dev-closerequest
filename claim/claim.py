@@ -151,6 +151,14 @@ class Claim(commands.Cog):
 
         await ctx.send(f"✅ {ctx.author.mention} claimed this ticket.")
 
+    @claim.error
+    async def claim_error(self, ctx, error):
+        if isinstance(error, commands.CheckFailure):
+            await ctx.send("❌ You can only use `claim` inside a ticket, and you must be a supporter.")
+            return
+
+        raise error
+
     @checks.has_permissions(PermissionLevel.SUPPORTER)
     @checks.thread_only()
     @commands.command(name="unclaim")
@@ -193,6 +201,14 @@ class Claim(commands.Cog):
             return
 
         await ctx.send("✅ This ticket has been unclaimed.")
+
+    @unclaim.error
+    async def unclaim_error(self, ctx, error):
+        if isinstance(error, commands.CheckFailure):
+            await ctx.send("❌ You can only use `unclaim` inside a ticket, and you must be a supporter or admin.")
+            return
+
+        raise error
 
 
 async def setup(bot):
