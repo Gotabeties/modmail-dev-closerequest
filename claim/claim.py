@@ -1,6 +1,7 @@
 from collections import OrderedDict
 from datetime import datetime, timezone
 
+import discord
 from discord.ext import commands
 
 from core.models import PermissionLevel
@@ -23,6 +24,18 @@ class Claim(commands.Cog):
         if len(self._processed_messages) > 200:
             self._processed_messages.popitem(last=False)
         return False
+
+    @staticmethod
+    def _supporter_suffix(name: str) -> str:
+        cleaned = "".join(ch for ch in str(name).lower() if ch.isalnum())
+        return cleaned[:5] or "staff"
+
+    @classmethod
+    def _build_claimed_name(cls, channel_name: str, supporter_name: str) -> str:
+        suffix = cls._supporter_suffix(supporter_name)
+        max_base_length = 100 - len(suffix) - 1
+        base_name = channel_name[:max_base_length]
+        return f"{base_name}-{suffix}"
 
     async def _check_permissions(self, ctx) -> bool:
         try:
@@ -53,6 +66,8 @@ class Claim(commands.Cog):
                     "claimer_id": int(ctx.author.id),
                     "claimer_name": str(ctx.author),
                     "claimer_mention": getattr(ctx.author, "mention", str(ctx.author)),
+                    "base_channel_name": str(ctx.channel.name),
+                    "claimed_channel_name": self._build_claimed_name(ctx.channel.name, ctx.author.name),
                     "claimed_at": datetime.now(timezone.utc).isoformat(),
                     "active": True,
                 }
@@ -97,6 +112,16 @@ class Claim(commands.Cog):
                     await ctx.send(f"❌ This ticket is already claimed by {current_name}.")
                 return
 
+            claimed_name = self._build_claimed_name(ctx.channel.name, ctx.author.name)
+            try:
+                await ctx.channel.edit(name=claimed_name, reason=f"Ticket claimed by {ctx.author}")
+            except discord.Forbidden:
+                await ctx.send("❌ I do not have permission to rename this ticket.")
+                return
+            except discord.HTTPException as error:
+                await ctx.send(f"❌ Could not rename this ticket: {error}")
+                return
+
             await self._set_claim_record(ctx, thread)
             await ctx.send(f"✅ {ctx.author.mention} claimed this ticket.")
         except Exception as error:
@@ -127,6 +152,16 @@ class Claim(commands.Cog):
 
             if current_claimer_id != ctx.author.id and not is_admin:
                 await ctx.send("❌ Only the supporter who claimed this ticket or an admin can unclaim it.")
+                return
+
+            base_channel_name = record.get("base_channel_name") or ctx.channel.name
+            try:
+                await ctx.channel.edit(name=base_channel_name, reason=f"Ticket unclaimed by {ctx.author}")
+            except discord.Forbidden:
+                await ctx.send("❌ I do not have permission to rename this ticket.")
+                return
+            except discord.HTTPException as error:
+                await ctx.send(f"❌ Could not rename this ticket: {error}")
                 return
 
             await self._clear_claim_record(thread.id)
