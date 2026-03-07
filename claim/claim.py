@@ -4,7 +4,6 @@ import re
 import discord
 from discord.ext import commands
 
-from core import checks
 from core.models import PermissionLevel
 
 
@@ -108,14 +107,33 @@ class Claim(commands.Cog):
         base_name = channel_name[:max_base_length]
         return f"{base_name}-{suffix}"
 
-    @checks.has_permissions(PermissionLevel.SUPPORTER)
-    @checks.thread_only()
+    async def _check_permissions(self, ctx) -> bool:
+        """Returns True if author has at least SUPPORTER level. Sends an error and returns False otherwise."""
+        try:
+            level = await self.bot.get_permission_level(ctx.author)
+            if level >= PermissionLevel.SUPPORTER:
+                return True
+        except Exception:
+            # Fall back to guild admin check if permission lookup fails
+            if getattr(ctx.author, "guild_permissions", None) and ctx.author.guild_permissions.administrator:
+                return True
+
+        await ctx.send("❌ You need to be a supporter to use this command.")
+        return False
+
     @commands.command(name="claim")
     async def claim(self, ctx):
         """Claim the current ticket."""
         try:
-            channel = await self._get_ticket_channel(ctx)
+            if not await self._check_permissions(ctx):
+                return
 
+            thread = getattr(ctx, "thread", None)
+            if thread is None:
+                await ctx.send("❌ This command can only be used inside a ticket.")
+                return
+
+            channel = await self._get_ticket_channel(ctx)
             if channel is None:
                 await ctx.send("❌ Could not find the ticket channel.")
                 return
@@ -127,7 +145,7 @@ class Claim(commands.Cog):
                 if current_suffix == supporter_suffix:
                     await ctx.send("ℹ️ This ticket is already claimed by you.")
                 else:
-                    await ctx.send("❌ This ticket is already claimed.")
+                    await ctx.send(f"❌ This ticket is already claimed by someone else.")
                 return
 
             new_name = self._build_claimed_name(current_base_name, ctx.author.name)
@@ -137,45 +155,33 @@ class Claim(commands.Cog):
             except discord.Forbidden:
                 await ctx.send("❌ I do not have permission to rename this ticket.")
                 return
-            except discord.HTTPException:
-                await ctx.send("❌ I could not rename this ticket right now.")
+            except discord.HTTPException as e:
+                await ctx.send(f"❌ Could not rename this ticket: {e}")
                 return
 
             self._remember_claim(channel.id, current_base_name, supporter_suffix)
-
-            channel, _, updated_suffix = await self._get_claim_state(channel, retries=4, delay=0.4)
-            if updated_suffix != supporter_suffix:
-                await ctx.send(
-                    f"❌ I tried to claim this ticket, but Discord did not keep the rename. Current channel name: `{channel.name}`"
-                )
-                return
-
             await ctx.send(f"✅ {ctx.author.mention} claimed this ticket.")
         except Exception as error:
             await ctx.send(f"❌ Claim failed: {type(error).__name__}: {error}")
 
-    @claim.error
-    async def claim_error(self, ctx, error):
-        if isinstance(error, commands.CheckFailure):
-            await ctx.send("❌ You can only use `claim` inside a ticket, and you must be a supporter.")
-            return
-
-        await ctx.send(f"❌ Claim command error: {type(error).__name__}: {error}")
-        return
-
-    @checks.has_permissions(PermissionLevel.SUPPORTER)
-    @checks.thread_only()
     @commands.command(name="unclaim")
     async def unclaim(self, ctx):
         """Unclaim the current ticket."""
         try:
-            channel = await self._get_ticket_channel(ctx)
+            if not await self._check_permissions(ctx):
+                return
 
+            thread = getattr(ctx, "thread", None)
+            if thread is None:
+                await ctx.send("❌ This command can only be used inside a ticket.")
+                return
+
+            channel = await self._get_ticket_channel(ctx)
             if channel is None:
                 await ctx.send("❌ Could not find the ticket channel.")
                 return
 
-            channel, base_name, current_suffix = await self._get_claim_state(channel, retries=4, delay=0.4)
+            channel, base_name, current_suffix = await self._get_claim_state(channel, retries=2, delay=0.3)
             if current_suffix is None:
                 await ctx.send("ℹ️ This ticket is not claimed.")
                 return
@@ -192,31 +198,14 @@ class Claim(commands.Cog):
             except discord.Forbidden:
                 await ctx.send("❌ I do not have permission to rename this ticket.")
                 return
-            except discord.HTTPException:
-                await ctx.send("❌ I could not rename this ticket right now.")
+            except discord.HTTPException as e:
+                await ctx.send(f"❌ Could not rename this ticket: {e}")
                 return
 
             self._clear_claim(channel.id)
-
-            channel, _, updated_suffix = await self._get_claim_state(channel, retries=4, delay=0.4)
-            if updated_suffix is not None:
-                await ctx.send(
-                    f"❌ I tried to unclaim this ticket, but Discord did not keep the rename. Current channel name: `{channel.name}`"
-                )
-                return
-
             await ctx.send("✅ This ticket has been unclaimed.")
         except Exception as error:
             await ctx.send(f"❌ Unclaim failed: {type(error).__name__}: {error}")
-
-    @unclaim.error
-    async def unclaim_error(self, ctx, error):
-        if isinstance(error, commands.CheckFailure):
-            await ctx.send("❌ You can only use `unclaim` inside a ticket, and you must be a supporter or admin.")
-            return
-
-        await ctx.send(f"❌ Unclaim command error: {type(error).__name__}: {error}")
-        return
 
 
 async def setup(bot):
