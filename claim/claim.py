@@ -16,8 +16,10 @@ class Claim(commands.Cog):
         self.bot = bot
 
     async def _get_ticket_channel(self, ctx):
-        thread = getattr(ctx, "thread", None)
-        channel = getattr(thread, "channel", None)
+        channel = getattr(ctx, "channel", None)
+        if channel is None:
+            thread = getattr(ctx, "thread", None)
+            channel = getattr(thread, "channel", None)
         if channel is None:
             return None
 
@@ -29,8 +31,24 @@ class Claim(commands.Cog):
             else:
                 fresh_channel = await self.bot.fetch_channel(channel.id)
 
-            if isinstance(fresh_channel, discord.TextChannel):
+            if hasattr(fresh_channel, "name") and hasattr(fresh_channel, "edit"):
                 return fresh_channel
+        except (discord.Forbidden, discord.HTTPException, discord.NotFound):
+            pass
+
+        return channel
+
+    async def _refresh_channel(self, channel):
+        guild = getattr(channel, "guild", None)
+
+        try:
+            if guild is not None:
+                refreshed = await guild.fetch_channel(channel.id)
+            else:
+                refreshed = await self.bot.fetch_channel(channel.id)
+
+            if hasattr(refreshed, "name") and hasattr(refreshed, "edit"):
+                return refreshed
         except (discord.Forbidden, discord.HTTPException, discord.NotFound):
             pass
 
@@ -87,6 +105,14 @@ class Claim(commands.Cog):
             await ctx.send("❌ I could not rename this ticket right now.")
             return
 
+        channel = await self._refresh_channel(channel)
+        _, updated_suffix = self._split_claimed_name(channel.name)
+        if updated_suffix != supporter_suffix:
+            await ctx.send(
+                f"❌ I tried to claim this ticket, but Discord did not keep the rename. Current channel name: `{channel.name}`"
+            )
+            return
+
         await ctx.send(f"✅ {ctx.author.mention} claimed this ticket.")
 
     @checks.has_permissions(PermissionLevel.SUPPORTER)
@@ -119,6 +145,14 @@ class Claim(commands.Cog):
             return
         except discord.HTTPException:
             await ctx.send("❌ I could not rename this ticket right now.")
+            return
+
+        channel = await self._refresh_channel(channel)
+        _, updated_suffix = self._split_claimed_name(channel.name)
+        if updated_suffix is not None:
+            await ctx.send(
+                f"❌ I tried to unclaim this ticket, but Discord did not keep the rename. Current channel name: `{channel.name}`"
+            )
             return
 
         await ctx.send("✅ This ticket has been unclaimed.")
