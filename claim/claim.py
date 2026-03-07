@@ -15,6 +15,27 @@ class Claim(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
+    async def _get_ticket_channel(self, ctx):
+        thread = getattr(ctx, "thread", None)
+        channel = getattr(thread, "channel", None)
+        if channel is None:
+            return None
+
+        guild = getattr(ctx, "guild", None) or getattr(channel, "guild", None)
+
+        try:
+            if guild is not None:
+                fresh_channel = await guild.fetch_channel(channel.id)
+            else:
+                fresh_channel = await self.bot.fetch_channel(channel.id)
+
+            if isinstance(fresh_channel, discord.TextChannel):
+                return fresh_channel
+        except (discord.Forbidden, discord.HTTPException, discord.NotFound):
+            pass
+
+        return channel
+
     @staticmethod
     def _supporter_suffix(name: str) -> str:
         cleaned = re.sub(r"[^a-z0-9]", "", str(name).lower())
@@ -39,8 +60,7 @@ class Claim(commands.Cog):
     @commands.command(name="claim")
     async def claim(self, ctx):
         """Claim the current ticket."""
-        thread = ctx.thread
-        channel = thread.channel
+        channel = await self._get_ticket_channel(ctx)
 
         if channel is None:
             await ctx.send("❌ Could not find the ticket channel.")
@@ -74,8 +94,7 @@ class Claim(commands.Cog):
     @commands.command(name="unclaim")
     async def unclaim(self, ctx):
         """Unclaim the current ticket."""
-        thread = ctx.thread
-        channel = thread.channel
+        channel = await self._get_ticket_channel(ctx)
 
         if channel is None:
             await ctx.send("❌ Could not find the ticket channel.")
