@@ -283,16 +283,22 @@ class AITicket(commands.Cog):
             return content[:1900]
 
     def _is_in_cooldown(self, thread_id: int) -> bool:
+        return self._cooldown_remaining(thread_id) > 0
+
+    def _cooldown_remaining(self, thread_id: int) -> int:
         cooldown = max(0, int(self.config.get("cooldown_seconds", 8)))
         if cooldown == 0:
-            return False
+            return 0
 
         now = datetime.now(timezone.utc)
         last = self._last_reply_at.get(thread_id)
         if last is None:
-            return False
+            return 0
 
-        return (now - last).total_seconds() < cooldown
+        elapsed = (now - last).total_seconds()
+        if elapsed >= cooldown:
+            return 0
+        return int(cooldown - elapsed + 0.999)
 
     async def _invoke_modmail_command(self, command_text: str, thread, message) -> bool:
         """Invoke a Modmail command in thread context, bypassing permission checks."""
@@ -393,14 +399,19 @@ class AITicket(commands.Cog):
             return
 
         thread_id = int(getattr(thread, "id", 0) or channel.id)
-        if self._is_in_cooldown(thread_id):
-            return
 
         lock = self._thread_locks.setdefault(thread_id, asyncio.Lock())
         if lock.locked():
             return
 
         async with lock:
+            thinking_msg: Optional[discord.Message] = None
+            remaining = self._cooldown_remaining(thread_id)
+            if remaining > 0:
+                waiting_text = f"⏳ Waiting for cooldown ({remaining}s)..."
+                thinking_msg = await self._send_thinking_message(thread, message, waiting_text)
+                await asyncio.sleep(remaining)
+
             if self._is_escalation_request(incoming_text):
                 if thread is None:
                     # Fallback path has no thread object; perform category move directly.
@@ -430,7 +441,7 @@ class AITicket(commands.Cog):
                         await self._edit_or_send_fallback(
                             thread,
                             message,
-                            None,
+                            thinking_msg,
                             "I moved this ticket for a human team member to continue with you.",
                         )
                     return
@@ -450,11 +461,22 @@ class AITicket(commands.Cog):
                         "I moved this ticket for a human team member to continue with you.",
                     )
                     if not sent:
-                        await channel.send("⚠️ Could not send outward handoff reply (reply command not found).")
+                        await self._edit_or_send_fallback(
+                            thread,
+                            message,
+                            thinking_msg,
+                            "⚠️ Could not send outward handoff reply (reply command not found).",
+                        )
                 return
 
             thinking_text = str(self.config.get("thinking_message", "Thinking...")).strip() or "Thinking..."
-            thinking_msg = await self._send_thinking_message(thread, message, f"🤖 {thinking_text}")
+            if thinking_msg is not None:
+                try:
+                    await thinking_msg.edit(content=f"🤖 {thinking_text}")
+                except Exception:
+                    thinking_msg = await self._send_thinking_message(thread, message, f"🤖 {thinking_text}")
+            else:
+                thinking_msg = await self._send_thinking_message(thread, message, f"🤖 {thinking_text}")
 
             try:
                 prompt_messages = await self._build_ai_messages(
@@ -464,10 +486,9 @@ class AITicket(commands.Cog):
                 )
                 ai_reply = await self._request_ai_reply(prompt_messages)
                 sent = await self._send_ticket_reply(thread, message, ai_reply)
-                if sent:
-                    await self._edit_or_send_fallback(thread, message, thinking_msg, "✅ Sent AI reply to user.")
-                else:
-                    await self._edit_or_send_fallback(thread, message, thinking_msg, ai_reply)
+                await self._edit_or_send_fallback(thread, message, thinking_msg, ai_reply)
+                if not sent and thread is not None:
+                    await channel.send("⚠️ Could not send outward AI reply command; posted fallback in ticket channel.")
                 self._last_reply_at[thread_id] = datetime.now(timezone.utc)
                 self._runtime["processed"] += 1
             except Exception as exc:
