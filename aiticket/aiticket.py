@@ -41,6 +41,8 @@ class AITicket(commands.Cog):
             "allowed_category_ids": [],
             "allowed_channel_ids": [],
             "escalation_category_id": None,
+            "ai_handoff_enabled": True,
+            "handoff_ping_everyone": True,
             "escalation_keywords": [
                 "real person",
                 "human",
@@ -104,7 +106,7 @@ class AITicket(commands.Cog):
                 self.config[key] = self.default_config[key]
             await self.update_config()
 
-            await self._load_kb()
+        await self._load_kb()
 
         self.session = aiohttp.ClientSession()
 
@@ -120,30 +122,17 @@ class AITicket(commands.Cog):
         )
 
     async def _load_kb(self):
-        data = await self.db.find_one({"_id": "aiticket-kb"})
-        entries = data.get("entries", []) if isinstance(data, dict) else []
-        if not isinstance(entries, list):
-            entries = []
-
         self._kb_entries = []
         self._kb_tokens = {}
-        for item in entries:
-            if not isinstance(item, dict):
-                continue
-            doc_id = str(item.get("id", "")).strip()
-            text = str(item.get("text", "")).strip()
-            if not doc_id or not text:
-                continue
-            source = str(item.get("source", "unknown"))
-            self._kb_entries.append({"id": doc_id, "source": source, "text": text})
-            self._kb_tokens[doc_id] = self._tokenize(text)
+        try:
+            await self._import_kb_from_modmail_logs(limit=int(self.config.get("db_import_limit", 1000)))
+        except Exception:
+            # Best effort only; knowledge context will refresh later via kbimportdb.
+            self._kb_entries = []
+            self._kb_tokens = {}
 
     async def _save_kb(self):
-        await self.db.find_one_and_update(
-            {"_id": "aiticket-kb"},
-            {"$set": {"entries": self._kb_entries, "updated_at": datetime.now(timezone.utc).isoformat()}},
-            upsert=True,
-        )
+        return None
 
     @staticmethod
     def _tokenize(text: str) -> set:
@@ -528,6 +517,50 @@ class AITicket(commands.Cog):
         return "Relevant past resolved tickets (use as guidance, not strict rules):\n" + "\n".join(lines)
 
     @staticmethod
+    def _parse_json_response(raw_text: str) -> dict:
+        text = (raw_text or "").strip()
+        if text.startswith("```"):
+            text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE)
+            text = re.sub(r"\s*```$", "", text)
+
+        start = text.find("{")
+        end = text.rfind("}")
+        if start == -1 or end == -1 or end <= start:
+            raise ValueError("No JSON object found in AI response.")
+
+        return json.loads(text[start : end + 1])
+
+    async def _request_ai_ticket_action(self, messages: List[dict]) -> dict:
+        decision_messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You are deciding whether a ticket should be handled by the AI or handed to humans. "
+                    "Use the retrieved ticket knowledge base first. If the user needs a human or the issue is out of scope, set handoff=true. "
+                    "Return JSON only with keys: reply, handoff, handoff_reason. "
+                    "reply must be the user-facing response. If handoff is true, reply should be a short escalation acknowledgement. "
+                    "Do not include markdown fences or extra text."
+                ),
+            },
+        ] + messages
+
+        raw_reply = await self._request_ai_reply(decision_messages)
+        try:
+            data = self._parse_json_response(raw_reply)
+        except Exception:
+            # Fallback to treating the raw response as a normal reply.
+            return {"reply": raw_reply.strip(), "handoff": False, "handoff_reason": ""}
+
+        reply = str(data.get("reply", "")).strip()
+        handoff = bool(data.get("handoff", False))
+        handoff_reason = str(data.get("handoff_reason", "")).strip()
+
+        if not reply:
+            reply = raw_reply.strip() or "I’m checking on that now."
+
+        return {"reply": reply[:1900], "handoff": handoff, "handoff_reason": handoff_reason[:400]}
+
+    @staticmethod
     def _clean_list_ids(values: List[int]) -> List[int]:
         deduped = []
         seen = set()
@@ -882,6 +915,13 @@ class AITicket(commands.Cog):
                     sent = await self._edit_ticket_reply(thread, message, handoff_text) if status_sent else False
                     if not sent:
                         await self._send_ticket_reply(thread, message, handoff_text)
+                    try:
+                        await thread.channel.send(
+                            f"@everyone Human handoff requested: {status_message}",
+                            allowed_mentions=discord.AllowedMentions(everyone=True, roles=True, users=True),
+                        )
+                    except Exception:
+                        pass
                 return
 
             thinking_text = str(self.config.get("thinking_message", "Thinking...")).strip() or "Thinking..."
@@ -898,7 +938,23 @@ class AITicket(commands.Cog):
                     message,
                     incoming_text=incoming_text,
                 )
-                ai_reply = await self._request_ai_reply(prompt_messages)
+                ai_result = await self._request_ai_ticket_action(prompt_messages)
+                ai_reply = str(ai_result.get("reply") or "").strip()
+                should_handoff = bool(ai_result.get("handoff", False)) and self.config.get("ai_handoff_enabled", True)
+                handoff_reason = str(ai_result.get("handoff_reason") or "").strip()
+
+                if should_handoff and thread is not None:
+                    moved, move_status = await self._move_thread_to_escalation(thread, message.author)
+                    if moved:
+                        handoff_ping = f"@everyone Human handoff requested by AI: {handoff_reason or move_status}"
+                        try:
+                            await thread.channel.send(
+                                handoff_ping,
+                                allowed_mentions=discord.AllowedMentions(everyone=True, roles=True, users=True),
+                            )
+                        except Exception:
+                            pass
+
                 sent = await self._edit_ticket_reply(thread, message, ai_reply) if status_sent else False
                 if not sent:
                     await self._send_ticket_reply(thread, message, ai_reply)
@@ -999,6 +1055,7 @@ class AITicket(commands.Cog):
         embed.add_field(name="Retrieval Enabled", value=str(self.config.get("retrieval_enabled", False)), inline=True)
         embed.add_field(name="Retrieval Top K", value=str(self.config.get("retrieval_top_k", 3)), inline=True)
         embed.add_field(name="KB Entries", value=str(len(self._kb_entries)), inline=True)
+        embed.add_field(name="AI Handoff", value=str(self.config.get("ai_handoff_enabled", True)), inline=True)
         embed.add_field(name="DB Import Limit", value=str(self.config.get("db_import_limit", 1000)), inline=True)
         embed.add_field(
             name="DB Collections",
