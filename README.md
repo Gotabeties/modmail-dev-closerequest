@@ -62,5 +62,7 @@ Useful config commands:
 ```?aiticket sethistory <1-20>```
 ```?aiticket setcooldown <0-600>```
 ```?aiticket setprompt <system prompt>```
+```?aiticket setthinking <status message>```
+```?aiticket setescalateonerror <true/false>```
 ```?aiticket addkeyword <phrase>```
 ```?aiticket removekeyword <phrase>```

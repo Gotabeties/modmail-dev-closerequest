@@ -47,6 +47,8 @@ class AITicket(commands.Cog):
                 "If unsure, ask one clarifying question. Never claim actions are done unless they are confirmed."
             ),
             "error_notice_enabled": False,
+            "escalate_on_error": True,
+            "thinking_message": "Thinking...",
         }
         self.config = None
         self.session: Optional[aiohttp.ClientSession] = None
@@ -234,6 +236,19 @@ class AITicket(commands.Cog):
 
         return (now - last).total_seconds() < cooldown
 
+    async def _edit_or_send(self, thread, target_message: Optional[discord.Message], text: str):
+        if target_message is not None:
+            try:
+                await target_message.edit(content=text)
+                return
+            except Exception:
+                pass
+
+        try:
+            await thread.reply(text)
+        except Exception:
+            pass
+
     @commands.Cog.listener()
     async def on_thread_reply(self, thread, from_mod, message, anonymous, plain):
         if not self.config.get("enabled", False):
@@ -273,15 +288,44 @@ class AITicket(commands.Cog):
                         pass
                 return
 
+            thinking_msg: Optional[discord.Message] = None
+            try:
+                thinking_text = str(self.config.get("thinking_message", "Thinking...")).strip() or "Thinking..."
+                thinking_msg = await thread.reply(f"🤖 {thinking_text}")
+            except Exception:
+                thinking_msg = None
+
             try:
                 prompt_messages = await self._build_ai_messages(thread, message)
                 ai_reply = await self._request_ai_reply(prompt_messages)
-                await thread.reply(ai_reply)
+                await self._edit_or_send(thread, thinking_msg, ai_reply)
                 self._last_reply_at[thread_id] = datetime.now(timezone.utc)
             except Exception as exc:
+                escalated = False
+                escalation_status = None
+
+                if self.config.get("escalate_on_error", True):
+                    escalated, escalation_status = await self._move_thread_to_escalation(thread, message.author)
+
+                if escalated:
+                    await self._edit_or_send(
+                        thread,
+                        thinking_msg,
+                        "I hit an error while generating a reply. I moved this ticket so a human team member can help you next.",
+                    )
+                else:
+                    await self._edit_or_send(
+                        thread,
+                        thinking_msg,
+                        "I hit an error while generating a reply. A staff member will continue helping you.",
+                    )
+
                 if self.config.get("error_notice_enabled", False):
                     try:
-                        await thread.channel.send(f"⚠️ AI auto-reply failed: {exc}")
+                        details = f"⚠️ AI auto-reply failed: {exc}"
+                        if escalation_status:
+                            details += f" | Escalation: {escalation_status}"
+                        await thread.channel.send(details)
                     except Exception:
                         pass
 
@@ -307,6 +351,8 @@ class AITicket(commands.Cog):
         embed.add_field(name="Temperature", value=str(self.config.get("temperature", 0.5)), inline=True)
         embed.add_field(name="Max Tokens", value=str(self.config.get("max_tokens", 220)), inline=True)
         embed.add_field(name="Cooldown (s)", value=str(self.config.get("cooldown_seconds", 8)), inline=True)
+        embed.add_field(name="Escalate On Error", value=str(self.config.get("escalate_on_error", True)), inline=True)
+        embed.add_field(name="Thinking Message", value=str(self.config.get("thinking_message", "Thinking..."))[:1024], inline=False)
 
         embed.add_field(
             name="Allowed Channels",
@@ -445,6 +491,27 @@ class AITicket(commands.Cog):
         self.config["error_notice_enabled"] = bool(enabled)
         await self.update_config()
         await ctx.send(f"✅ Error notices set to `{enabled}`")
+
+    @checks.has_permissions(PermissionLevel.ADMINISTRATOR)
+    @aiticket_group.command(name="setescalateonerror")
+    async def aiticket_setescalateonerror(self, ctx, enabled: bool):
+        """Enable or disable automatic category move when AI fails."""
+        self.config["escalate_on_error"] = bool(enabled)
+        await self.update_config()
+        await ctx.send(f"✅ Escalate on error set to `{enabled}`")
+
+    @checks.has_permissions(PermissionLevel.ADMINISTRATOR)
+    @aiticket_group.command(name="setthinking")
+    async def aiticket_setthinking(self, ctx, *, text: str):
+        """Set the temporary status message shown while AI is generating."""
+        cleaned = text.strip()
+        if not cleaned:
+            await ctx.send("❌ Thinking message cannot be empty.")
+            return
+
+        self.config["thinking_message"] = cleaned[:150]
+        await self.update_config()
+        await ctx.send(f"✅ Thinking message set to `{self.config['thinking_message']}`")
 
     @checks.has_permissions(PermissionLevel.ADMINISTRATOR)
     @aiticket_group.command(name="addchannel")
