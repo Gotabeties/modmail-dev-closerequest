@@ -2,6 +2,11 @@ import asyncio
 from collections import OrderedDict
 from copy import copy
 from datetime import datetime, timezone
+import hashlib
+import json
+import math
+from pathlib import Path
+import re
 from typing import Dict, List, Optional
 
 import aiohttp
@@ -55,6 +60,14 @@ class AITicket(commands.Cog):
             "thinking_message": "Thinking...",
             "reply_command": "freply",
             "edit_command": "edit",
+            "retrieval_enabled": False,
+            "retrieval_top_k": 3,
+            "retrieval_min_score": 0.12,
+            "retrieval_max_snippet_chars": 350,
+            "retrieval_max_context_chars": 1600,
+            "kb_max_entries": 5000,
+            "db_collection_candidates": ["logs", "tickets", "threads", "transcripts"],
+            "db_import_limit": 1000,
         }
         self.config = None
         self.session: Optional[aiohttp.ClientSession] = None
@@ -69,6 +82,8 @@ class AITicket(commands.Cog):
             "skipped_not_allowed": 0,
             "errors": 0,
         }
+        self._kb_entries: List[Dict[str, str]] = []
+        self._kb_tokens: Dict[str, set] = {}
 
     async def cog_load(self):
         self.config = await self.db.find_one({"_id": "aiticket-config"})
@@ -82,6 +97,8 @@ class AITicket(commands.Cog):
                 self.config[key] = self.default_config[key]
             await self.update_config()
 
+            await self._load_kb()
+
         self.session = aiohttp.ClientSession()
 
     async def cog_unload(self):
@@ -94,6 +111,414 @@ class AITicket(commands.Cog):
             {"$set": self.config},
             upsert=True,
         )
+
+    async def _load_kb(self):
+        data = await self.db.find_one({"_id": "aiticket-kb"})
+        entries = data.get("entries", []) if isinstance(data, dict) else []
+        if not isinstance(entries, list):
+            entries = []
+
+        self._kb_entries = []
+        self._kb_tokens = {}
+        for item in entries:
+            if not isinstance(item, dict):
+                continue
+            doc_id = str(item.get("id", "")).strip()
+            text = str(item.get("text", "")).strip()
+            if not doc_id or not text:
+                continue
+            source = str(item.get("source", "unknown"))
+            self._kb_entries.append({"id": doc_id, "source": source, "text": text})
+            self._kb_tokens[doc_id] = self._tokenize(text)
+
+    async def _save_kb(self):
+        await self.db.find_one_and_update(
+            {"_id": "aiticket-kb"},
+            {"$set": {"entries": self._kb_entries, "updated_at": datetime.now(timezone.utc).isoformat()}},
+            upsert=True,
+        )
+
+    @staticmethod
+    def _tokenize(text: str) -> set:
+        words = re.findall(r"[a-zA-Z0-9_]{3,}", (text or "").lower())
+        return set(words)
+
+    @staticmethod
+    def _similarity(query_tokens: set, doc_tokens: set) -> float:
+        if not query_tokens or not doc_tokens:
+            return 0.0
+        overlap = len(query_tokens.intersection(doc_tokens))
+        if overlap == 0:
+            return 0.0
+        return overlap / math.sqrt(len(query_tokens) * len(doc_tokens))
+
+    @staticmethod
+    def _extract_json_text(obj) -> str:
+        chunks = []
+
+        def walk(value):
+            if isinstance(value, dict):
+                preferred = ["content", "message", "text", "body", "subject", "resolution"]
+                for key in preferred:
+                    if key in value and isinstance(value[key], str):
+                        chunks.append(value[key])
+                for v in value.values():
+                    walk(v)
+            elif isinstance(value, list):
+                for v in value:
+                    walk(v)
+            elif isinstance(value, str):
+                chunks.append(value)
+
+        walk(obj)
+        return "\n".join(chunks)
+
+    @staticmethod
+    def _normalize_text(text: str) -> str:
+        text = (text or "").replace("\r\n", "\n").replace("\r", "\n")
+        text = re.sub(r"\n{3,}", "\n\n", text)
+        return text.strip()
+
+    def _read_transcript_file(self, file_path: Path) -> str:
+        try:
+            suffix = file_path.suffix.lower()
+            if suffix == ".json":
+                with file_path.open("r", encoding="utf-8") as f:
+                    obj = json.load(f)
+                return self._normalize_text(self._extract_json_text(obj))
+
+            with file_path.open("r", encoding="utf-8", errors="ignore") as f:
+                return self._normalize_text(f.read())
+        except Exception:
+            return ""
+
+    def _get_db_handles(self) -> List:
+        handles = []
+
+        def add(handle):
+            if handle is None:
+                return
+            if handle in handles:
+                return
+            handles.append(handle)
+
+        add(getattr(self.bot, "db", None))
+        add(getattr(self.bot, "database", None))
+
+        api = getattr(self.bot, "api", None)
+        if api is not None:
+            add(getattr(api, "db", None))
+            add(getattr(api, "database", None))
+
+        mongo = getattr(self.bot, "mongo", None)
+        if mongo is not None:
+            add(getattr(mongo, "db", None))
+            add(getattr(mongo, "database", None))
+
+        return handles
+
+    async def _iter_collection_docs(self, collection, limit: int) -> List[dict]:
+        docs = []
+        safe_limit = max(1, limit)
+
+        try:
+            cursor = collection.find({})
+        except Exception:
+            return docs
+
+        # Motor cursor path
+        if hasattr(cursor, "to_list"):
+            try:
+                docs = await cursor.to_list(length=safe_limit)
+                return [d for d in docs if isinstance(d, dict)]
+            except Exception:
+                docs = []
+
+        # Async iterator path
+        try:
+            count = 0
+            async for item in cursor:
+                if isinstance(item, dict):
+                    docs.append(item)
+                    count += 1
+                if count >= safe_limit:
+                    break
+            if docs:
+                return docs
+        except Exception:
+            pass
+
+        # Sync iterator path
+        try:
+            for item in cursor:
+                if isinstance(item, dict):
+                    docs.append(item)
+                if len(docs) >= safe_limit:
+                    break
+        except Exception:
+            pass
+
+        return docs
+
+    def _extract_ticket_text_from_doc(self, doc: dict) -> str:
+        if not isinstance(doc, dict):
+            return ""
+
+        pieces = []
+
+        def walk(value):
+            if isinstance(value, dict):
+                preferred_keys = [
+                    "message",
+                    "content",
+                    "text",
+                    "body",
+                    "subject",
+                    "title",
+                    "response",
+                    "resolution",
+                    "plain",
+                ]
+                for key in preferred_keys:
+                    candidate = value.get(key)
+                    if isinstance(candidate, str):
+                        candidate = candidate.strip()
+                        if candidate:
+                            pieces.append(candidate)
+                for child in value.values():
+                    walk(child)
+            elif isinstance(value, list):
+                for child in value:
+                    walk(child)
+            elif isinstance(value, str):
+                cleaned = value.strip()
+                if cleaned:
+                    pieces.append(cleaned)
+
+        walk(doc)
+        text = self._normalize_text("\n".join(pieces))
+        if len(text) > 14000:
+            text = text[:14000]
+        return text
+
+    def _extract_modmail_log_text(self, log_doc: dict) -> str:
+        if not isinstance(log_doc, dict):
+            return ""
+
+        pieces = []
+        title = str(log_doc.get("title") or "").strip()
+        close_message = str(log_doc.get("close_message") or "").strip()
+        if title:
+            pieces.append(f"Title: {title}")
+        if close_message:
+            pieces.append(f"Close message: {close_message}")
+
+        for msg in log_doc.get("messages", []) or []:
+            if not isinstance(msg, dict):
+                continue
+            content = str(msg.get("content") or "").strip()
+            if not content:
+                continue
+
+            author = msg.get("author") or {}
+            name = str(author.get("name") or "user").strip()
+            mod_flag = bool(author.get("mod", False))
+            role = "staff" if mod_flag else "user"
+            pieces.append(f"[{role}:{name}] {content}")
+
+        text = self._normalize_text("\n".join(pieces))
+        if len(text) > 14000:
+            text = text[:14000]
+        return text
+
+    async def _import_kb_from_modmail_logs(self, *, limit: int):
+        api = getattr(self.bot, "api", None)
+        logs_collection = getattr(api, "logs", None)
+        if logs_collection is None:
+            return 0, 0, "bot.api.logs not available."
+
+        guild_id = getattr(self.bot, "guild_id", None)
+        query = {"open": False}
+        if guild_id is not None:
+            query["guild_id"] = str(guild_id)
+
+        projection = {
+            "key": 1,
+            "channel_id": 1,
+            "title": 1,
+            "close_message": 1,
+            "messages": 1,
+        }
+
+        docs = []
+        safe_limit = max(1, int(limit))
+        try:
+            cursor = logs_collection.find(query, projection)
+            if hasattr(cursor, "sort"):
+                try:
+                    cursor = cursor.sort("closed_at", -1)
+                except Exception:
+                    pass
+
+            if hasattr(cursor, "to_list"):
+                docs = await cursor.to_list(length=safe_limit)
+            else:
+                async for item in cursor:
+                    docs.append(item)
+                    if len(docs) >= safe_limit:
+                        break
+        except Exception as exc:
+            return 0, 0, f"Failed querying logs collection: {exc}"
+
+        if not docs:
+            return 0, 0, "No closed logs found in logs collection."
+
+        max_entries = max(100, min(50000, int(self.config.get("kb_max_entries", 5000))))
+        existing = {item["id"]: item for item in self._kb_entries}
+
+        imported = 0
+        scanned = 0
+        for doc in docs:
+            if not isinstance(doc, dict):
+                continue
+            scanned += 1
+            text = self._extract_modmail_log_text(doc)
+            if len(text) < 40:
+                continue
+
+            source_key = str(doc.get("key") or doc.get("channel_id") or doc.get("_id") or "unknown")
+            doc_id = hashlib.sha1(("logs\n" + source_key + "\n" + text[:500]).encode("utf-8", errors="ignore")).hexdigest()
+            existing[doc_id] = {
+                "id": doc_id,
+                "source": f"db:logs:{source_key}",
+                "text": text,
+            }
+            imported += 1
+
+        new_entries = list(existing.values())
+        if len(new_entries) > max_entries:
+            new_entries = new_entries[-max_entries:]
+
+        self._kb_entries = new_entries
+        self._kb_tokens = {item["id"]: self._tokenize(item["text"]) for item in self._kb_entries}
+        await self._save_kb()
+
+        return imported, scanned, "Imported from Modmail logs collection via bot.api.logs."
+
+    async def _import_kb_from_database(self, *, limit: int, preferred_collection: Optional[str] = None):
+        preferred = (preferred_collection or "").strip().lower()
+        prefer_logs = preferred in {"", "logs", "log", "modmail_logs"}
+        if prefer_logs:
+            imported, scanned, detail = await self._import_kb_from_modmail_logs(limit=limit)
+            if imported > 0:
+                return imported, scanned, detail
+
+        handles = self._get_db_handles()
+        if not handles:
+            return 0, 0, "No database handle found on bot object."
+
+        candidates = []
+        if preferred_collection:
+            candidates.append(preferred_collection.strip())
+        for name in self.config.get("db_collection_candidates", []):
+            name = str(name).strip()
+            if name and name not in candidates:
+                candidates.append(name)
+
+        max_entries = max(100, min(50000, int(self.config.get("kb_max_entries", 5000))))
+        existing = {item["id"]: item for item in self._kb_entries}
+
+        imported = 0
+        scanned = 0
+        successful_collection = None
+
+        for db in handles:
+            for name in candidates:
+                collection = None
+                try:
+                    collection = db[name]
+                except Exception:
+                    collection = getattr(db, name, None)
+
+                if collection is None:
+                    continue
+
+                docs = await self._iter_collection_docs(collection, limit)
+                if not docs:
+                    continue
+
+                successful_collection = name
+                for doc in docs:
+                    scanned += 1
+                    text = self._extract_ticket_text_from_doc(doc)
+                    if len(text) < 40:
+                        continue
+
+                    source_key = str(doc.get("_id") or doc.get("id") or "unknown")
+                    doc_id = hashlib.sha1((name + "\n" + source_key + "\n" + text[:500]).encode("utf-8", errors="ignore")).hexdigest()
+                    existing[doc_id] = {
+                        "id": doc_id,
+                        "source": f"db:{name}:{source_key}",
+                        "text": text,
+                    }
+                    imported += 1
+
+                if imported > 0:
+                    break
+            if imported > 0:
+                break
+
+        if imported == 0:
+            return 0, scanned, "No usable transcript records found in configured collections."
+
+        new_entries = list(existing.values())
+        if len(new_entries) > max_entries:
+            new_entries = new_entries[-max_entries:]
+
+        self._kb_entries = new_entries
+        self._kb_tokens = {item["id"]: self._tokenize(item["text"]) for item in self._kb_entries}
+        await self._save_kb()
+
+        return imported, scanned, f"Imported from collection '{successful_collection}'."
+
+    def _build_retrieval_context(self, user_text: str) -> str:
+        if not self.config.get("retrieval_enabled", False):
+            return ""
+
+        query_tokens = self._tokenize(user_text)
+        if not query_tokens or not self._kb_entries:
+            return ""
+
+        top_k = max(1, min(10, int(self.config.get("retrieval_top_k", 3))))
+        min_score = float(self.config.get("retrieval_min_score", 0.12))
+        snippet_chars = max(100, min(800, int(self.config.get("retrieval_max_snippet_chars", 350))))
+        max_context_chars = max(400, min(5000, int(self.config.get("retrieval_max_context_chars", 1600))))
+
+        scored = []
+        for item in self._kb_entries:
+            tokens = self._kb_tokens.get(item["id"], set())
+            score = self._similarity(query_tokens, tokens)
+            if score >= min_score:
+                scored.append((score, item))
+
+        if not scored:
+            return ""
+
+        scored.sort(key=lambda x: x[0], reverse=True)
+        lines = []
+        total = 0
+        for score, item in scored[:top_k]:
+            snippet = item["text"][:snippet_chars]
+            line = f"- Source: {item['source']} | Score: {score:.3f} | Snippet: {snippet}"
+            if total + len(line) > max_context_chars:
+                break
+            lines.append(line)
+            total += len(line)
+
+        if not lines:
+            return ""
+
+        return "Relevant past resolved tickets (use as guidance, not strict rules):\n" + "\n".join(lines)
 
     @staticmethod
     def _clean_list_ids(values: List[int]) -> List[int]:
@@ -212,6 +637,9 @@ class AITicket(commands.Cog):
         messages = [{"role": "system", "content": self.config.get("system_prompt", "You are helpful.")}]
 
         user_text = (incoming_text or self._extract_message_text(user_message) or "")[:2000]
+        retrieval_context = self._build_retrieval_context(user_text)
+        if retrieval_context:
+            messages.append({"role": "system", "content": retrieval_context})
 
         if channel is None:
             messages.append({"role": "user", "content": user_text})
@@ -221,7 +649,7 @@ class AITicket(commands.Cog):
         history = []
         try:
             async for msg in channel.history(limit=history_count, oldest_first=False):
-                if not msg.content:
+                if not self._extract_message_text(msg):
                     continue
                 history.append(msg)
         except Exception:
@@ -551,6 +979,15 @@ class AITicket(commands.Cog):
         embed.add_field(name="Thinking Message", value=str(self.config.get("thinking_message", "Thinking..."))[:1024], inline=False)
         embed.add_field(name="Reply Command", value=str(self.config.get("reply_command", "reply")), inline=True)
         embed.add_field(name="Edit Command", value=str(self.config.get("edit_command", "edit")), inline=True)
+        embed.add_field(name="Retrieval Enabled", value=str(self.config.get("retrieval_enabled", False)), inline=True)
+        embed.add_field(name="Retrieval Top K", value=str(self.config.get("retrieval_top_k", 3)), inline=True)
+        embed.add_field(name="KB Entries", value=str(len(self._kb_entries)), inline=True)
+        embed.add_field(name="DB Import Limit", value=str(self.config.get("db_import_limit", 1000)), inline=True)
+        embed.add_field(
+            name="DB Collections",
+            value=", ".join(self.config.get("db_collection_candidates", []))[:1024] or "None",
+            inline=False,
+        )
         runtime = self._runtime
         embed.add_field(
             name="Runtime",
@@ -581,6 +1018,128 @@ class AITicket(commands.Cog):
 
         embed.add_field(name="Escalation Keywords", value=", ".join(keywords[:25]) if keywords else "None", inline=False)
         await ctx.send(embed=embed)
+
+    @checks.has_permissions(PermissionLevel.ADMINISTRATOR)
+    @aiticket_group.command(name="kbimport")
+    async def aiticket_kbimport(self, ctx, *, path: str):
+        """Import past ticket transcripts from a file or folder path."""
+        root = Path(path.strip().strip('"').strip("'"))
+        if not root.exists():
+            await ctx.send("❌ Path not found.")
+            return
+
+        await ctx.send("📚 Importing ticket transcripts into AI knowledge base...")
+
+        files = []
+        allowed_ext = {".txt", ".log", ".md", ".json"}
+        if root.is_file():
+            files = [root]
+        else:
+            for p in root.rglob("*"):
+                if p.is_file() and p.suffix.lower() in allowed_ext:
+                    files.append(p)
+
+        if not files:
+            await ctx.send("❌ No transcript files found (.txt/.log/.md/.json).")
+            return
+
+        existing = {item["id"]: item for item in self._kb_entries}
+        imported = 0
+        skipped = 0
+
+        for p in files:
+            text = self._read_transcript_file(p)
+            if len(text) < 40:
+                skipped += 1
+                continue
+
+            # Keep each document concise for retrieval and prompt injection.
+            text = text[:12000]
+            doc_id = hashlib.sha1((str(p.resolve()) + "\n" + text[:500]).encode("utf-8", errors="ignore")).hexdigest()
+            existing[doc_id] = {
+                "id": doc_id,
+                "source": str(p.name),
+                "text": text,
+            }
+            imported += 1
+
+        max_entries = max(100, min(50000, int(self.config.get("kb_max_entries", 5000))))
+        new_entries = list(existing.values())
+        new_entries.sort(key=lambda x: x.get("source", ""))
+        if len(new_entries) > max_entries:
+            new_entries = new_entries[-max_entries:]
+
+        self._kb_entries = new_entries
+        self._kb_tokens = {item["id"]: self._tokenize(item["text"]) for item in self._kb_entries}
+        await self._save_kb()
+
+        await ctx.send(
+            f"✅ KB import complete. Imported/updated: {imported}, skipped: {skipped}, total indexed: {len(self._kb_entries)}"
+        )
+
+    @checks.has_permissions(PermissionLevel.ADMINISTRATOR)
+    @aiticket_group.command(name="kbimportdb")
+    async def aiticket_kbimportdb(self, ctx, limit: int = None, *, collection: str = None):
+        """Import transcripts from Modmail database collections."""
+        if limit is None:
+            limit = int(self.config.get("db_import_limit", 1000))
+        limit = max(10, min(100000, int(limit)))
+
+        await ctx.send("📚 Importing ticket transcripts from database...")
+        imported, scanned, detail = await self._import_kb_from_database(
+            limit=limit,
+            preferred_collection=collection,
+        )
+
+        if imported == 0:
+            await ctx.send(f"❌ KB DB import failed. Scanned: {scanned}. {detail}")
+            return
+
+        await ctx.send(
+            f"✅ KB DB import complete. Imported/updated: {imported}, scanned: {scanned}, total indexed: {len(self._kb_entries)}. {detail}"
+        )
+
+    @checks.has_permissions(PermissionLevel.ADMINISTRATOR)
+    @aiticket_group.command(name="kbclear")
+    async def aiticket_kbclear(self, ctx):
+        """Clear all indexed ticket knowledge entries."""
+        self._kb_entries = []
+        self._kb_tokens = {}
+        await self._save_kb()
+        await ctx.send("✅ Cleared all AI ticket knowledge entries.")
+
+    @checks.has_permissions(PermissionLevel.ADMINISTRATOR)
+    @aiticket_group.command(name="kbsearch")
+    async def aiticket_kbsearch(self, ctx, *, query: str):
+        """Search indexed ticket knowledge for similar past issues."""
+        query = query.strip()
+        if not query:
+            await ctx.send("❌ Query cannot be empty.")
+            return
+
+        tokens = self._tokenize(query)
+        if not tokens:
+            await ctx.send("❌ Query needs at least one word with 3+ characters.")
+            return
+
+        scored = []
+        for item in self._kb_entries:
+            score = self._similarity(tokens, self._kb_tokens.get(item["id"], set()))
+            if score > 0:
+                scored.append((score, item))
+
+        if not scored:
+            await ctx.send("ℹ️ No similar indexed tickets found.")
+            return
+
+        scored.sort(key=lambda x: x[0], reverse=True)
+        top = scored[:5]
+        lines = []
+        for score, item in top:
+            snippet = item["text"][:180].replace("\n", " ")
+            lines.append(f"- {item['source']} (score={score:.3f}) :: {snippet}")
+
+        await ctx.send("\n".join(lines)[:1900])
 
     @checks.has_permissions(PermissionLevel.ADMINISTRATOR)
     @aiticket_group.command(name="test")
@@ -691,6 +1250,64 @@ class AITicket(commands.Cog):
         self.config["history_messages"] = int(value)
         await self.update_config()
         await ctx.send(f"✅ History messages set to: `{value}`")
+
+    @checks.has_permissions(PermissionLevel.ADMINISTRATOR)
+    @aiticket_group.command(name="setretrieval")
+    async def aiticket_setretrieval(self, ctx, enabled: bool):
+        """Enable or disable retrieval from indexed past tickets."""
+        self.config["retrieval_enabled"] = bool(enabled)
+        await self.update_config()
+        await ctx.send(f"✅ Retrieval is now `{enabled}`")
+
+    @checks.has_permissions(PermissionLevel.ADMINISTRATOR)
+    @aiticket_group.command(name="setretrievaltopk")
+    async def aiticket_setretrievaltopk(self, ctx, value: int):
+        """Set number of similar past tickets to inject (1-10)."""
+        if value < 1 or value > 10:
+            await ctx.send("❌ Retrieval top_k must be between 1 and 10")
+            return
+
+        self.config["retrieval_top_k"] = int(value)
+        await self.update_config()
+        await ctx.send(f"✅ Retrieval top_k set to: `{value}`")
+
+    @checks.has_permissions(PermissionLevel.ADMINISTRATOR)
+    @aiticket_group.command(name="setretrievalmin")
+    async def aiticket_setretrievalmin(self, ctx, value: float):
+        """Set minimum similarity score for retrieval context (0.0-1.0)."""
+        if value < 0 or value > 1:
+            await ctx.send("❌ Retrieval minimum score must be between 0.0 and 1.0")
+            return
+
+        self.config["retrieval_min_score"] = float(value)
+        await self.update_config()
+        await ctx.send(f"✅ Retrieval minimum score set to: `{value}`")
+
+    @checks.has_permissions(PermissionLevel.ADMINISTRATOR)
+    @aiticket_group.command(name="setdbcollections")
+    async def aiticket_setdbcollections(self, ctx, *, names: str):
+        """Set DB collection candidates for kbimportdb, comma-separated."""
+        parts = [part.strip() for part in names.split(",")]
+        cleaned = [part for part in parts if part]
+        if not cleaned:
+            await ctx.send("❌ Provide at least one collection name.")
+            return
+
+        self.config["db_collection_candidates"] = cleaned[:20]
+        await self.update_config()
+        await ctx.send(f"✅ DB collections set to: {', '.join(self.config['db_collection_candidates'])}")
+
+    @checks.has_permissions(PermissionLevel.ADMINISTRATOR)
+    @aiticket_group.command(name="setdbimportlimit")
+    async def aiticket_setdbimportlimit(self, ctx, value: int):
+        """Set default limit for kbimportdb (10-100000)."""
+        if value < 10 or value > 100000:
+            await ctx.send("❌ DB import limit must be between 10 and 100000")
+            return
+
+        self.config["db_import_limit"] = int(value)
+        await self.update_config()
+        await ctx.send(f"✅ DB import limit set to: `{value}`")
 
     @checks.has_permissions(PermissionLevel.ADMINISTRATOR)
     @aiticket_group.command(name="settimeout")

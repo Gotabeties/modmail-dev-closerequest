@@ -62,11 +62,20 @@ Useful config commands:
 ```?aiticket setmaxtokens <20-2000>```
 ```?aiticket sethistory <1-20>```
 ```?aiticket setcooldown <0-600>```
+```?aiticket setretrieval <true/false>```
+```?aiticket setretrievaltopk <1-10>```
+```?aiticket setretrievalmin <0.0-1.0>```
 ```?aiticket setprompt <system prompt>```
 ```?aiticket setthinking <status message>```
 ```?aiticket setreplycommand <freply|areply|reply|...>```
 ```?aiticket seteditcommand <edit|...>```
 ```?aiticket setescalateonerror <true/false>```
 ```?aiticket test [optional prompt]```
+```?aiticket kbimport <file-or-folder-path>```
+```?aiticket kbimportdb [limit] [collection]```
+```?aiticket setdbcollections <logs,tickets,...>```
+```?aiticket setdbimportlimit <10-100000>```
+```?aiticket kbsearch <query>```
+```?aiticket kbclear```
 ```?aiticket addkeyword <phrase>```
 ```?aiticket removekeyword <phrase>```
