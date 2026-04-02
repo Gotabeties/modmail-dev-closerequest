@@ -1,14 +1,17 @@
 import asyncio
 from collections import OrderedDict
+from copy import copy
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
 import aiohttp
 import discord
 from discord.ext import commands
+from discord.ext.commands.view import StringView
 
 from core import checks
-from core.models import PermissionLevel
+from core.models import DummyMessage, PermissionLevel
+from core.utils import normalize_alias
 
 
 class AITicket(commands.Cog):
@@ -50,6 +53,7 @@ class AITicket(commands.Cog):
             "error_notice_enabled": False,
             "escalate_on_error": True,
             "thinking_message": "Thinking...",
+            "reply_command": "reply",
         }
         self.config = None
         self.session: Optional[aiohttp.ClientSession] = None
@@ -290,6 +294,40 @@ class AITicket(commands.Cog):
 
         return (now - last).total_seconds() < cooldown
 
+    async def _invoke_modmail_command(self, command_text: str, thread, message) -> bool:
+        """Invoke a Modmail command in thread context, bypassing permission checks."""
+        ctxs = []
+        aliases = normalize_alias(command_text)
+        for alias in aliases:
+            view = StringView(self.bot.prefix + alias)
+            ctx_ = commands.Context(prefix=self.bot.prefix, view=view, bot=self.bot, message=message)
+            ctx_.thread = thread
+            discord.utils.find(view.skip_string, await self.bot.get_prefix())
+            ctx_.invoked_with = view.get_word().lower()
+            ctx_.command = self.bot.all_commands.get(ctx_.invoked_with)
+            ctxs.append(ctx_)
+
+        invoked = False
+        for ctx in ctxs:
+            if ctx.command:
+                invoked = True
+                old_checks = copy(ctx.command.checks)
+                ctx.command.checks = [checks.has_permissions(PermissionLevel.INVALID)]
+                await self.bot.invoke(ctx)
+                ctx.command.checks = old_checks
+        return invoked
+
+    async def _send_ticket_reply(self, thread, source_message: discord.Message, text: str) -> bool:
+        """Send outward user reply using configurable Modmail reply command alias."""
+        if thread is None:
+            return False
+
+        reply_command = str(self.config.get("reply_command", "reply")).strip() or "reply"
+        dummy = DummyMessage(copy(source_message))
+        dummy.author = getattr(thread, "recipient", source_message.author)
+        dummy.content = f"{self.bot.prefix}{reply_command} {text}"
+        return await self._invoke_modmail_command(f"{reply_command} {text}", thread, dummy)
+
     async def _edit_or_send(self, thread, target_message: Optional[discord.Message], text: str):
         if target_message is not None:
             try:
@@ -306,8 +344,8 @@ class AITicket(commands.Cog):
     async def _send_thinking_message(self, thread, source_message: discord.Message, text: str) -> Optional[discord.Message]:
         try:
             if thread is not None:
-                return await thread.reply(text)
-            return await source_message.reply(text, mention_author=False)
+                return await thread.channel.send(text)
+            return await source_message.channel.send(text)
         except Exception:
             return None
 
@@ -321,9 +359,9 @@ class AITicket(commands.Cog):
 
         try:
             if thread is not None:
-                await thread.reply(text)
+                await thread.channel.send(text)
             else:
-                await source_message.reply(text, mention_author=False)
+                await source_message.channel.send(text)
         except Exception:
             pass
 
@@ -396,10 +434,13 @@ class AITicket(commands.Cog):
                     pass
 
                 if ok:
-                    try:
-                        await thread.reply("I moved this ticket for a human team member to continue with you.")
-                    except Exception:
-                        pass
+                    sent = await self._send_ticket_reply(
+                        thread,
+                        message,
+                        "I moved this ticket for a human team member to continue with you.",
+                    )
+                    if not sent:
+                        await channel.send("⚠️ Could not send outward handoff reply (reply command not found).")
                 return
 
             thinking_text = str(self.config.get("thinking_message", "Thinking...")).strip() or "Thinking..."
@@ -412,7 +453,11 @@ class AITicket(commands.Cog):
                     incoming_text=incoming_text,
                 )
                 ai_reply = await self._request_ai_reply(prompt_messages)
-                await self._edit_or_send_fallback(thread, message, thinking_msg, ai_reply)
+                sent = await self._send_ticket_reply(thread, message, ai_reply)
+                if sent:
+                    await self._edit_or_send_fallback(thread, message, thinking_msg, "✅ Sent AI reply to user.")
+                else:
+                    await self._edit_or_send_fallback(thread, message, thinking_msg, ai_reply)
                 self._last_reply_at[thread_id] = datetime.now(timezone.utc)
                 self._runtime["processed"] += 1
             except Exception as exc:
@@ -516,6 +561,7 @@ class AITicket(commands.Cog):
         embed.add_field(name="Cooldown (s)", value=str(self.config.get("cooldown_seconds", 8)), inline=True)
         embed.add_field(name="Escalate On Error", value=str(self.config.get("escalate_on_error", True)), inline=True)
         embed.add_field(name="Thinking Message", value=str(self.config.get("thinking_message", "Thinking..."))[:1024], inline=False)
+        embed.add_field(name="Reply Command", value=str(self.config.get("reply_command", "reply")), inline=True)
         runtime = self._runtime
         embed.add_field(
             name="Runtime",
@@ -722,6 +768,23 @@ class AITicket(commands.Cog):
         self.config["thinking_message"] = cleaned[:150]
         await self.update_config()
         await ctx.send(f"✅ Thinking message set to `{self.config['thinking_message']}`")
+
+    @checks.has_permissions(PermissionLevel.ADMINISTRATOR)
+    @aiticket_group.command(name="setreplycommand")
+    async def aiticket_setreplycommand(self, ctx, *, command_name: str):
+        """Set the Modmail command alias used to send outward replies (reply/freply/etc)."""
+        cleaned = command_name.strip().lower()
+        if not cleaned:
+            await ctx.send("❌ Reply command cannot be empty.")
+            return
+
+        if " " in cleaned:
+            await ctx.send("❌ Reply command must be a single command name.")
+            return
+
+        self.config["reply_command"] = cleaned
+        await self.update_config()
+        await ctx.send(f"✅ Reply command set to `{cleaned}`")
 
     @checks.has_permissions(PermissionLevel.ADMINISTRATOR)
     @aiticket_group.command(name="addchannel")
