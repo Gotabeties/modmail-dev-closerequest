@@ -32,3 +32,35 @@ Adds a Hiring Request Menu panel with private controls to add, edit, and delete 
 
 ```?plugin add Gotabeties/modmail-dev-closerequest/hiring@master```
 ```?hiringconfig```
+
+# AI Ticket Auto Reply (Hermes API)
+
+Auto replies with AI only in the ticket channels/categories you configure, using a Hermes-compatible OpenAI endpoint.
+If a user asks for a real person, the ticket channel can be moved to a separate escalation category.
+
+```?plugin add Gotabeties/modmail-dev-closerequest/aiticket@master```
+```?aiticket```
+
+Quick setup:
+
+```?aiticket setbaseurl https://hermes.ai.unturf.com/v1```
+```?aiticket setapikey choose-any-value```
+```?aiticket setmodel adamo1139/Hermes-3-Llama-3.1-8B-FP8-Dynamic```
+```?aiticket addcategory <your-ticket-category>```
+```?aiticket setescalationcategory <your-human-escalation-category>```
+```?aiticket toggle```
+
+Useful config commands:
+
+```?aiticket status```
+```?aiticket addchannel #ticket-channel```
+```?aiticket removechannel #ticket-channel```
+```?aiticket addcategory <category>```
+```?aiticket removecategory <category>```
+```?aiticket settemperature <0.0-2.0>```
+```?aiticket setmaxtokens <20-2000>```
+```?aiticket sethistory <1-20>```
+```?aiticket setcooldown <0-600>```
+```?aiticket setprompt <system prompt>```
+```?aiticket addkeyword <phrase>```
+```?aiticket removekeyword <phrase>```
