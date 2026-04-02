@@ -64,5 +64,6 @@ Useful config commands:
 ```?aiticket setprompt <system prompt>```
 ```?aiticket setthinking <status message>```
 ```?aiticket setescalateonerror <true/false>```
+```?aiticket test [optional prompt]```
 ```?aiticket addkeyword <phrase>```
 ```?aiticket removekeyword <phrase>```

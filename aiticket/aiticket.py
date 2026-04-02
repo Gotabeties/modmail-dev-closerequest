@@ -1,4 +1,5 @@
 import asyncio
+from collections import OrderedDict
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
@@ -54,6 +55,15 @@ class AITicket(commands.Cog):
         self.session: Optional[aiohttp.ClientSession] = None
         self._thread_locks: Dict[int, asyncio.Lock] = {}
         self._last_reply_at: Dict[int, datetime] = {}
+        self._processed_messages = OrderedDict()
+        self._runtime = {
+            "thread_reply_events": 0,
+            "message_fallback_events": 0,
+            "processed": 0,
+            "skipped_from_mod": 0,
+            "skipped_not_allowed": 0,
+            "errors": 0,
+        }
 
     async def cog_load(self):
         self.config = await self.db.find_one({"_id": "aiticket-config"})
@@ -92,8 +102,7 @@ class AITicket(commands.Cog):
             deduped.append(ivalue)
         return deduped
 
-    def _thread_is_allowed(self, thread) -> bool:
-        channel = getattr(thread, "channel", None)
+    def _channel_is_allowed(self, channel) -> bool:
         if channel is None:
             return False
 
@@ -110,6 +119,18 @@ class AITicket(commands.Cog):
         if allowed_categories and channel_category_id in allowed_categories:
             return True
 
+        return False
+
+    def _thread_is_allowed(self, thread) -> bool:
+        return self._channel_is_allowed(getattr(thread, "channel", None))
+
+    def _is_already_processed(self, message_id: int) -> bool:
+        if message_id in self._processed_messages:
+            return True
+
+        self._processed_messages[message_id] = True
+        if len(self._processed_messages) > 500:
+            self._processed_messages.popitem(last=False)
         return False
 
     def _is_escalation_request(self, content: str) -> bool:
@@ -249,18 +270,44 @@ class AITicket(commands.Cog):
         except Exception:
             pass
 
-    @commands.Cog.listener()
-    async def on_thread_reply(self, thread, from_mod, message, anonymous, plain):
-        if not self.config.get("enabled", False):
-            return
+    async def _send_thinking_message(self, thread, source_message: discord.Message, text: str) -> Optional[discord.Message]:
+        try:
+            if thread is not None:
+                return await thread.reply(text)
+            return await source_message.reply(text, mention_author=False)
+        except Exception:
+            return None
 
+    async def _edit_or_send_fallback(self, thread, source_message: discord.Message, target_message: Optional[discord.Message], text: str):
+        if target_message is not None:
+            try:
+                await target_message.edit(content=text)
+                return
+            except Exception:
+                pass
+
+        try:
+            if thread is not None:
+                await thread.reply(text)
+            else:
+                await source_message.reply(text, mention_author=False)
+        except Exception:
+            pass
+
+    async def _handle_incoming_message(self, thread, from_mod: bool, message: discord.Message):
         if from_mod:
+            self._runtime["skipped_from_mod"] += 1
             return
 
-        if not self._thread_is_allowed(thread):
+        channel = getattr(thread, "channel", None) if thread is not None else getattr(message, "channel", None)
+        if not self._channel_is_allowed(channel):
+            self._runtime["skipped_not_allowed"] += 1
             return
 
-        thread_id = int(thread.id)
+        if self._is_already_processed(int(message.id)):
+            return
+
+        thread_id = int(getattr(thread, "id", 0) or channel.id)
         if self._is_in_cooldown(thread_id):
             return
 
@@ -270,9 +317,42 @@ class AITicket(commands.Cog):
 
         async with lock:
             if self._is_escalation_request(message.content):
+                if thread is None:
+                    # Fallback path has no thread object; perform category move directly.
+                    escalation_category_id = self.config.get("escalation_category_id")
+                    if escalation_category_id is None:
+                        await self._edit_or_send_fallback(
+                            thread,
+                            message,
+                            None,
+                            "Escalation requested, but no escalation category is configured.",
+                        )
+                        return
+
+                    category = channel.guild.get_channel(int(escalation_category_id))
+                    status_message = "Escalation category is invalid."
+                    ok = False
+                    if isinstance(category, discord.CategoryChannel):
+                        try:
+                            await channel.edit(category=category, reason="AI escalation requested")
+                            ok = True
+                            status_message = f"Moved this ticket to **{category.name}** for human support."
+                        except Exception as exc:
+                            status_message = f"Failed to move channel: {exc}"
+
+                    await channel.send(f"🧭 Escalation check: {status_message}")
+                    if ok:
+                        await self._edit_or_send_fallback(
+                            thread,
+                            message,
+                            None,
+                            "I moved this ticket for a human team member to continue with you.",
+                        )
+                    return
+
                 ok, status_message = await self._move_thread_to_escalation(thread, message.author)
                 try:
-                    await thread.channel.send(
+                    await channel.send(
                         f"🧭 Escalation check: {status_message}",
                     )
                 except Exception:
@@ -285,34 +365,48 @@ class AITicket(commands.Cog):
                         pass
                 return
 
-            thinking_msg: Optional[discord.Message] = None
-            try:
-                thinking_text = str(self.config.get("thinking_message", "Thinking...")).strip() or "Thinking..."
-                thinking_msg = await thread.reply(f"🤖 {thinking_text}")
-            except Exception:
-                thinking_msg = None
+            thinking_text = str(self.config.get("thinking_message", "Thinking...")).strip() or "Thinking..."
+            thinking_msg = await self._send_thinking_message(thread, message, f"🤖 {thinking_text}")
 
             try:
-                prompt_messages = await self._build_ai_messages(thread, message)
+                prompt_messages = await self._build_ai_messages(thread if thread is not None else type("T", (), {"channel": channel})(), message)
                 ai_reply = await self._request_ai_reply(prompt_messages)
-                await self._edit_or_send(thread, thinking_msg, ai_reply)
+                await self._edit_or_send_fallback(thread, message, thinking_msg, ai_reply)
                 self._last_reply_at[thread_id] = datetime.now(timezone.utc)
+                self._runtime["processed"] += 1
             except Exception as exc:
+                self._runtime["errors"] += 1
                 escalated = False
                 escalation_status = None
 
                 if self.config.get("escalate_on_error", True):
-                    escalated, escalation_status = await self._move_thread_to_escalation(thread, message.author)
+                    if thread is not None:
+                        escalated, escalation_status = await self._move_thread_to_escalation(thread, message.author)
+                    else:
+                        escalation_category_id = self.config.get("escalation_category_id")
+                        if escalation_category_id is not None:
+                            category = channel.guild.get_channel(int(escalation_category_id))
+                            if isinstance(category, discord.CategoryChannel):
+                                try:
+                                    await channel.edit(category=category, reason="AI auto-reply failure escalation")
+                                    escalated = True
+                                    escalation_status = f"Moved this ticket to **{category.name}** for human support."
+                                except Exception as move_exc:
+                                    escalation_status = f"Failed to move channel: {move_exc}"
+                        else:
+                            escalation_status = "Escalation category is not configured."
 
                 if escalated:
-                    await self._edit_or_send(
+                    await self._edit_or_send_fallback(
                         thread,
+                        message,
                         thinking_msg,
                         "I hit an error while generating a reply. I moved this ticket so a human team member can help you next.",
                     )
                 else:
-                    await self._edit_or_send(
+                    await self._edit_or_send_fallback(
                         thread,
+                        message,
                         thinking_msg,
                         "I hit an error while generating a reply. A staff member will continue helping you.",
                     )
@@ -322,9 +416,35 @@ class AITicket(commands.Cog):
                         details = f"⚠️ AI auto-reply failed: {exc}"
                         if escalation_status:
                             details += f" | Escalation: {escalation_status}"
-                        await thread.channel.send(details)
+                        await channel.send(details)
                     except Exception:
                         pass
+
+    @commands.Cog.listener()
+    async def on_thread_reply(self, thread, from_mod, message, anonymous, plain):
+        if not self.config.get("enabled", False):
+            return
+
+        self._runtime["thread_reply_events"] += 1
+        await self._handle_incoming_message(thread, from_mod, message)
+
+    @commands.Cog.listener()
+    async def on_message(self, message: discord.Message):
+        if not self.config.get("enabled", False):
+            return
+
+        if message.guild is None:
+            return
+
+        # Fallback for Modmail builds where inbound user relays don't trigger on_thread_reply.
+        if message.webhook_id is None:
+            return
+
+        if not self._channel_is_allowed(message.channel):
+            return
+
+        self._runtime["message_fallback_events"] += 1
+        await self._handle_incoming_message(None, False, message)
 
     @checks.has_permissions(PermissionLevel.ADMINISTRATOR)
     @commands.group(name="aiticket", invoke_without_command=True)
@@ -350,6 +470,17 @@ class AITicket(commands.Cog):
         embed.add_field(name="Cooldown (s)", value=str(self.config.get("cooldown_seconds", 8)), inline=True)
         embed.add_field(name="Escalate On Error", value=str(self.config.get("escalate_on_error", True)), inline=True)
         embed.add_field(name="Thinking Message", value=str(self.config.get("thinking_message", "Thinking..."))[:1024], inline=False)
+        runtime = self._runtime
+        embed.add_field(
+            name="Runtime",
+            value=(
+                f"thread_reply_events={runtime['thread_reply_events']}, "
+                f"fallback_events={runtime['message_fallback_events']}, "
+                f"processed={runtime['processed']}, "
+                f"errors={runtime['errors']}"
+            )[:1024],
+            inline=False,
+        )
 
         embed.add_field(
             name="Allowed Channels",
@@ -369,6 +500,42 @@ class AITicket(commands.Cog):
 
         embed.add_field(name="Escalation Keywords", value=", ".join(keywords[:25]) if keywords else "None", inline=False)
         await ctx.send(embed=embed)
+
+    @checks.has_permissions(PermissionLevel.ADMINISTRATOR)
+    @aiticket_group.command(name="test")
+    async def aiticket_test(self, ctx, *, prompt: str = None):
+        """Test AI endpoint/model and return a sample response."""
+        test_prompt = (prompt or "Reply with exactly: AI test successful.").strip()
+        if len(test_prompt) > 800:
+            await ctx.send("❌ Test prompt is too long. Keep it under 800 characters.")
+            return
+
+        await ctx.send("🧪 Testing AI endpoint...")
+        started = datetime.now(timezone.utc)
+
+        messages = [
+            {"role": "system", "content": self.config.get("system_prompt", "You are helpful.")},
+            {"role": "user", "content": test_prompt},
+        ]
+
+        try:
+            ai_reply = await self._request_ai_reply(messages)
+            elapsed_ms = int((datetime.now(timezone.utc) - started).total_seconds() * 1000)
+
+            embed = discord.Embed(title="✅ AI Test Passed", color=discord.Color.green())
+            embed.add_field(name="Model", value=str(self.config.get("model", "N/A"))[:1024], inline=False)
+            embed.add_field(name="Base URL", value=str(self.config.get("base_url", "N/A"))[:1024], inline=False)
+            embed.add_field(name="Latency", value=f"{elapsed_ms} ms", inline=True)
+            embed.add_field(name="Sample Reply", value=ai_reply[:1024], inline=False)
+            await ctx.send(embed=embed)
+        except Exception as exc:
+            elapsed_ms = int((datetime.now(timezone.utc) - started).total_seconds() * 1000)
+            embed = discord.Embed(title="❌ AI Test Failed", color=discord.Color.red())
+            embed.add_field(name="Model", value=str(self.config.get("model", "N/A"))[:1024], inline=False)
+            embed.add_field(name="Base URL", value=str(self.config.get("base_url", "N/A"))[:1024], inline=False)
+            embed.add_field(name="Latency", value=f"{elapsed_ms} ms", inline=True)
+            embed.add_field(name="Error", value=str(exc)[:1024], inline=False)
+            await ctx.send(embed=embed)
 
     @checks.has_permissions(PermissionLevel.ADMINISTRATOR)
     @aiticket_group.command(name="toggle")
