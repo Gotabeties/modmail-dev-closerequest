@@ -52,8 +52,12 @@ class AITicket(commands.Cog):
                 "representative",
             ],
             "system_prompt": (
-                "You are a helpful Modmail support assistant. Keep responses concise, accurate, and polite. "
-                "If unsure, ask one clarifying question. Never claim actions are done unless they are confirmed."
+                "You are a senior Modmail support assistant. Provide concise, practical, and accurate help. "
+                "Use clear steps when troubleshooting. If information is missing, ask one targeted follow-up question. "
+                "Do not invent policies, actions, or outcomes. Never claim something is done unless it is confirmed. "
+                "When past ticket knowledge is provided, use it as context and adapt it to the current case. "
+                "Do not copy prior replies word-for-word unless quoting a short required phrase. "
+                "Write an original response tailored to this user and this ticket."
             ),
             "error_notice_enabled": False,
             "escalate_on_error": True,
@@ -639,6 +643,15 @@ class AITicket(commands.Cog):
         user_text = (incoming_text or self._extract_message_text(user_message) or "")[:2000]
         retrieval_context = self._build_retrieval_context(user_text)
         if retrieval_context:
+            messages.append(
+                {
+                    "role": "system",
+                    "content": (
+                        "Use the retrieved ticket context to improve accuracy and consistency. "
+                        "Summarize and adapt it to this case. Do not copy prior ticket wording verbatim."
+                    ),
+                }
+            )
             messages.append({"role": "system", "content": retrieval_context})
 
         if channel is None:
