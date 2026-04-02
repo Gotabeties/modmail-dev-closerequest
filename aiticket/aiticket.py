@@ -257,9 +257,6 @@ class AITicket(commands.Cog):
         if from_mod:
             return
 
-        if getattr(message.author, "bot", False):
-            return
-
         if not self._thread_is_allowed(thread):
             return
 
