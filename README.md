@@ -37,6 +37,7 @@ Adds a Hiring Request Menu panel with private controls to add, edit, and delete 
 
 Auto replies with AI only in the ticket channels/categories you configure, using a Hermes-compatible OpenAI endpoint.
 If a user asks for a real person, the ticket channel can be moved to a separate escalation category.
+Works with Modmail relays where inbound user messages appear in staff channels via webhook or bot embed cards.
 
 ```?plugin add Gotabeties/modmail-dev-closerequest/aiticket@master```
 ```?aiticket```

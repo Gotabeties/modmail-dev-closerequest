@@ -144,6 +144,37 @@ class AITicket(commands.Cog):
                 return True
         return False
 
+    @staticmethod
+    def _extract_message_text(message: discord.Message) -> str:
+        text = (getattr(message, "content", "") or "").strip()
+        if text:
+            return text
+
+        for embed in getattr(message, "embeds", []) or []:
+            if getattr(embed, "description", None):
+                desc = str(embed.description).strip()
+                if desc:
+                    return desc
+            for field in getattr(embed, "fields", []) or []:
+                value = str(getattr(field, "value", "") or "").strip()
+                if value:
+                    return value
+
+        return ""
+
+    @staticmethod
+    def _looks_like_relay_embed(message: discord.Message) -> bool:
+        embeds = getattr(message, "embeds", []) or []
+        if not embeds:
+            return False
+
+        for embed in embeds:
+            footer = getattr(embed, "footer", None)
+            footer_text = str(getattr(footer, "text", "") or "")
+            if "Message ID:" in footer_text:
+                return True
+        return False
+
     async def _move_thread_to_escalation(self, thread, requested_by: discord.abc.User):
         channel = getattr(thread, "channel", None)
         if channel is None:
@@ -171,12 +202,14 @@ class AITicket(commands.Cog):
         except discord.HTTPException as exc:
             return False, f"Failed to move channel: {exc}"
 
-    async def _build_ai_messages(self, thread, user_message: discord.Message) -> List[dict]:
+    async def _build_ai_messages(self, thread, user_message: discord.Message, incoming_text: str = "") -> List[dict]:
         channel = getattr(thread, "channel", None)
         messages = [{"role": "system", "content": self.config.get("system_prompt", "You are helpful.")}]
 
+        user_text = (incoming_text or self._extract_message_text(user_message) or "")[:2000]
+
         if channel is None:
-            messages.append({"role": "user", "content": user_message.content or ""})
+            messages.append({"role": "user", "content": user_text})
             return messages
 
         history_count = max(1, int(self.config.get("history_messages", 8)))
@@ -197,14 +230,14 @@ class AITicket(commands.Cog):
             else:
                 role = "user"
 
-            content = (msg.content or "").strip()
+            content = self._extract_message_text(msg)
             if not content:
                 continue
 
             messages.append({"role": role, "content": content[:2000]})
 
-        if not any(item.get("content") == (user_message.content or "").strip() for item in messages if item["role"] == "user"):
-            messages.append({"role": "user", "content": (user_message.content or "")[:2000]})
+        if user_text and not any(item.get("content") == user_text for item in messages if item["role"] == "user"):
+            messages.append({"role": "user", "content": user_text})
 
         return messages
 
@@ -307,6 +340,10 @@ class AITicket(commands.Cog):
         if self._is_already_processed(int(message.id)):
             return
 
+        incoming_text = self._extract_message_text(message)
+        if not incoming_text:
+            return
+
         thread_id = int(getattr(thread, "id", 0) or channel.id)
         if self._is_in_cooldown(thread_id):
             return
@@ -316,7 +353,7 @@ class AITicket(commands.Cog):
             return
 
         async with lock:
-            if self._is_escalation_request(message.content):
+            if self._is_escalation_request(incoming_text):
                 if thread is None:
                     # Fallback path has no thread object; perform category move directly.
                     escalation_category_id = self.config.get("escalation_category_id")
@@ -369,7 +406,11 @@ class AITicket(commands.Cog):
             thinking_msg = await self._send_thinking_message(thread, message, f"🤖 {thinking_text}")
 
             try:
-                prompt_messages = await self._build_ai_messages(thread if thread is not None else type("T", (), {"channel": channel})(), message)
+                prompt_messages = await self._build_ai_messages(
+                    thread if thread is not None else type("T", (), {"channel": channel})(),
+                    message,
+                    incoming_text=incoming_text,
+                )
                 ai_reply = await self._request_ai_reply(prompt_messages)
                 await self._edit_or_send_fallback(thread, message, thinking_msg, ai_reply)
                 self._last_reply_at[thread_id] = datetime.now(timezone.utc)
@@ -436,8 +477,13 @@ class AITicket(commands.Cog):
         if message.guild is None:
             return
 
+        is_webhook_relay = message.webhook_id is not None
+        is_bot_embed_relay = (
+            message.author.id == self.bot.user.id and self._looks_like_relay_embed(message)
+        )
+
         # Fallback for Modmail builds where inbound user relays don't trigger on_thread_reply.
-        if message.webhook_id is None:
+        if not is_webhook_relay and not is_bot_embed_relay:
             return
 
         if not self._channel_is_allowed(message.channel):
