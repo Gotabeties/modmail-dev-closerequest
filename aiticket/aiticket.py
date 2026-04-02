@@ -54,6 +54,7 @@ class AITicket(commands.Cog):
             "escalate_on_error": True,
             "thinking_message": "Thinking...",
             "reply_command": "freply",
+            "edit_command": "edit",
         }
         self.config = None
         self.session: Optional[aiohttp.ClientSession] = None
@@ -344,42 +345,56 @@ class AITicket(commands.Cog):
 
         return False
 
-    async def _edit_or_send(self, thread, target_message: Optional[discord.Message], text: str):
-        if target_message is not None:
-            try:
-                await target_message.edit(content=text)
-                return
-            except Exception:
-                pass
+    async def _edit_ticket_reply(self, thread, source_message: discord.Message, text: str) -> bool:
+        """Edit outward user reply using configurable Modmail edit command alias."""
+        if thread is None:
+            return False
 
-        try:
-            await thread.reply(text)
-        except Exception:
-            pass
+        configured = str(self.config.get("edit_command", "edit")).strip().lower() or "edit"
+        candidates = []
+        for cmd in [configured, "edit"]:
+            if cmd not in candidates:
+                candidates.append(cmd)
 
-    async def _send_thinking_message(self, thread, source_message: discord.Message, text: str) -> Optional[discord.Message]:
-        try:
-            if thread is not None:
-                return await thread.channel.send(text)
-            return await source_message.channel.send(text)
-        except Exception:
+        for edit_command in candidates:
+            dummy = DummyMessage(copy(source_message))
+            dummy.author = self.bot.user or source_message.author
+            dummy.content = f"{self.bot.prefix}{edit_command} {text}"
+            invoked = await self._invoke_modmail_command(f"{edit_command} {text}", thread, dummy)
+            if invoked:
+                return True
+
+        return False
+
+    async def _resolve_thread_from_channel(self, channel):
+        manager = getattr(self.bot, "threads", None)
+        if manager is None or channel is None:
             return None
 
-    async def _edit_or_send_fallback(self, thread, source_message: discord.Message, target_message: Optional[discord.Message], text: str):
-        if target_message is not None:
-            try:
-                await target_message.edit(content=text)
-                return
-            except Exception:
-                pass
+        candidates = [
+            ("find", (), {"channel": channel}),
+            ("find", (channel,), {}),
+            ("get", (), {"channel": channel}),
+            ("get", (channel,), {}),
+            ("find_by_channel", (channel,), {}),
+            ("from_channel", (channel,), {}),
+        ]
 
-        try:
-            if thread is not None:
-                await thread.channel.send(text)
-            else:
-                await source_message.channel.send(text)
-        except Exception:
-            pass
+        for method_name, args, kwargs in candidates:
+            method = getattr(manager, method_name, None)
+            if method is None:
+                continue
+
+            try:
+                result = method(*args, **kwargs)
+                if asyncio.iscoroutine(result):
+                    result = await result
+                if result is not None:
+                    return result
+            except Exception:
+                continue
+
+        return None
 
     async def _handle_incoming_message(self, thread, from_mod: bool, message: discord.Message):
         if from_mod:
@@ -405,78 +420,32 @@ class AITicket(commands.Cog):
             return
 
         async with lock:
-            thinking_msg: Optional[discord.Message] = None
+            status_sent = False
             remaining = self._cooldown_remaining(thread_id)
             if remaining > 0:
                 waiting_text = f"⏳ Waiting for cooldown ({remaining}s)..."
-                thinking_msg = await self._send_thinking_message(thread, message, waiting_text)
+                status_sent = await self._send_ticket_reply(thread, message, waiting_text)
                 await asyncio.sleep(remaining)
 
             if self._is_escalation_request(incoming_text):
                 if thread is None:
-                    # Fallback path has no thread object; perform category move directly.
-                    escalation_category_id = self.config.get("escalation_category_id")
-                    if escalation_category_id is None:
-                        await self._edit_or_send_fallback(
-                            thread,
-                            message,
-                            None,
-                            "Escalation requested, but no escalation category is configured.",
-                        )
-                        return
-
-                    category = channel.guild.get_channel(int(escalation_category_id))
-                    status_message = "Escalation category is invalid."
-                    ok = False
-                    if isinstance(category, discord.CategoryChannel):
-                        try:
-                            await channel.edit(category=category, reason="AI escalation requested")
-                            ok = True
-                            status_message = f"Moved this ticket to **{category.name}** for human support."
-                        except Exception as exc:
-                            status_message = f"Failed to move channel: {exc}"
-
-                    await channel.send(f"🧭 Escalation check: {status_message}")
-                    if ok:
-                        await self._edit_or_send_fallback(
-                            thread,
-                            message,
-                            thinking_msg,
-                            "I moved this ticket for a human team member to continue with you.",
-                        )
                     return
 
                 ok, status_message = await self._move_thread_to_escalation(thread, message.author)
-                try:
-                    await channel.send(
-                        f"🧭 Escalation check: {status_message}",
-                    )
-                except Exception:
-                    pass
-
                 if ok:
-                    sent = await self._send_ticket_reply(
-                        thread,
-                        message,
-                        "I moved this ticket for a human team member to continue with you.",
-                    )
+                    handoff_text = "I moved this ticket for a human team member to continue with you."
+                    sent = await self._edit_ticket_reply(thread, message, handoff_text) if status_sent else False
                     if not sent:
-                        await self._edit_or_send_fallback(
-                            thread,
-                            message,
-                            thinking_msg,
-                            "⚠️ Could not send outward handoff reply (reply command not found).",
-                        )
+                        await self._send_ticket_reply(thread, message, handoff_text)
                 return
 
             thinking_text = str(self.config.get("thinking_message", "Thinking...")).strip() or "Thinking..."
-            if thinking_msg is not None:
-                try:
-                    await thinking_msg.edit(content=f"🤖 {thinking_text}")
-                except Exception:
-                    thinking_msg = await self._send_thinking_message(thread, message, f"🤖 {thinking_text}")
+            if status_sent:
+                edited = await self._edit_ticket_reply(thread, message, f"🤖 {thinking_text}")
+                if not edited:
+                    status_sent = await self._send_ticket_reply(thread, message, f"🤖 {thinking_text}")
             else:
-                thinking_msg = await self._send_thinking_message(thread, message, f"🤖 {thinking_text}")
+                status_sent = await self._send_ticket_reply(thread, message, f"🤖 {thinking_text}")
 
             try:
                 prompt_messages = await self._build_ai_messages(
@@ -485,10 +454,9 @@ class AITicket(commands.Cog):
                     incoming_text=incoming_text,
                 )
                 ai_reply = await self._request_ai_reply(prompt_messages)
-                sent = await self._send_ticket_reply(thread, message, ai_reply)
-                await self._edit_or_send_fallback(thread, message, thinking_msg, ai_reply)
-                if not sent and thread is not None:
-                    await channel.send("⚠️ Could not send outward AI reply command; posted fallback in ticket channel.")
+                sent = await self._edit_ticket_reply(thread, message, ai_reply) if status_sent else False
+                if not sent:
+                    await self._send_ticket_reply(thread, message, ai_reply)
                 self._last_reply_at[thread_id] = datetime.now(timezone.utc)
                 self._runtime["processed"] += 1
             except Exception as exc:
@@ -514,28 +482,13 @@ class AITicket(commands.Cog):
                             escalation_status = "Escalation category is not configured."
 
                 if escalated:
-                    await self._edit_or_send_fallback(
-                        thread,
-                        message,
-                        thinking_msg,
-                        "I hit an error while generating a reply. I moved this ticket so a human team member can help you next.",
-                    )
+                    error_text = "I hit an error while generating a reply. I moved this ticket so a human team member can help you next."
                 else:
-                    await self._edit_or_send_fallback(
-                        thread,
-                        message,
-                        thinking_msg,
-                        "I hit an error while generating a reply. A staff member will continue helping you.",
-                    )
+                    error_text = "I hit an error while generating a reply. A staff member will continue helping you."
 
-                if self.config.get("error_notice_enabled", False):
-                    try:
-                        details = f"⚠️ AI auto-reply failed: {exc}"
-                        if escalation_status:
-                            details += f" | Escalation: {escalation_status}"
-                        await channel.send(details)
-                    except Exception:
-                        pass
+                sent = await self._edit_ticket_reply(thread, message, error_text) if status_sent else False
+                if not sent:
+                    await self._send_ticket_reply(thread, message, error_text)
 
     @commands.Cog.listener()
     async def on_thread_reply(self, thread, from_mod, message, anonymous, plain):
@@ -565,8 +518,12 @@ class AITicket(commands.Cog):
         if not self._channel_is_allowed(message.channel):
             return
 
+        thread = await self._resolve_thread_from_channel(message.channel)
+        if thread is None:
+            return
+
         self._runtime["message_fallback_events"] += 1
-        await self._handle_incoming_message(None, False, message)
+        await self._handle_incoming_message(thread, False, message)
 
     @checks.has_permissions(PermissionLevel.ADMINISTRATOR)
     @commands.group(name="aiticket", invoke_without_command=True)
@@ -593,6 +550,7 @@ class AITicket(commands.Cog):
         embed.add_field(name="Escalate On Error", value=str(self.config.get("escalate_on_error", True)), inline=True)
         embed.add_field(name="Thinking Message", value=str(self.config.get("thinking_message", "Thinking..."))[:1024], inline=False)
         embed.add_field(name="Reply Command", value=str(self.config.get("reply_command", "reply")), inline=True)
+        embed.add_field(name="Edit Command", value=str(self.config.get("edit_command", "edit")), inline=True)
         runtime = self._runtime
         embed.add_field(
             name="Runtime",
@@ -816,6 +774,23 @@ class AITicket(commands.Cog):
         self.config["reply_command"] = cleaned
         await self.update_config()
         await ctx.send(f"✅ Reply command set to `{cleaned}`")
+
+    @checks.has_permissions(PermissionLevel.ADMINISTRATOR)
+    @aiticket_group.command(name="seteditcommand")
+    async def aiticket_seteditcommand(self, ctx, *, command_name: str):
+        """Set the Modmail command alias used to edit outward replies (edit/etc)."""
+        cleaned = command_name.strip().lower()
+        if not cleaned:
+            await ctx.send("❌ Edit command cannot be empty.")
+            return
+
+        if " " in cleaned:
+            await ctx.send("❌ Edit command must be a single command name.")
+            return
+
+        self.config["edit_command"] = cleaned
+        await self.update_config()
+        await ctx.send(f"✅ Edit command set to `{cleaned}`")
 
     @checks.has_permissions(PermissionLevel.ADMINISTRATOR)
     @aiticket_group.command(name="addchannel")
