@@ -53,7 +53,7 @@ class AITicket(commands.Cog):
             "error_notice_enabled": False,
             "escalate_on_error": True,
             "thinking_message": "Thinking...",
-            "reply_command": "reply",
+            "reply_command": "freply",
         }
         self.config = None
         self.session: Optional[aiohttp.ClientSession] = None
@@ -322,11 +322,21 @@ class AITicket(commands.Cog):
         if thread is None:
             return False
 
-        reply_command = str(self.config.get("reply_command", "reply")).strip() or "reply"
-        dummy = DummyMessage(copy(source_message))
-        dummy.author = getattr(thread, "recipient", source_message.author)
-        dummy.content = f"{self.bot.prefix}{reply_command} {text}"
-        return await self._invoke_modmail_command(f"{reply_command} {text}", thread, dummy)
+        configured = str(self.config.get("reply_command", "freply")).strip().lower() or "freply"
+        candidates = []
+        for cmd in [configured, "freply", "areply", "reply"]:
+            if cmd not in candidates:
+                candidates.append(cmd)
+
+        for reply_command in candidates:
+            dummy = DummyMessage(copy(source_message))
+            dummy.author = self.bot.user or source_message.author
+            dummy.content = f"{self.bot.prefix}{reply_command} {text}"
+            invoked = await self._invoke_modmail_command(f"{reply_command} {text}", thread, dummy)
+            if invoked:
+                return True
+
+        return False
 
     async def _edit_or_send(self, thread, target_message: Optional[discord.Message], text: str):
         if target_message is not None:

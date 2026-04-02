@@ -64,7 +64,7 @@ Useful config commands:
 ```?aiticket setcooldown <0-600>```
 ```?aiticket setprompt <system prompt>```
 ```?aiticket setthinking <status message>```
-```?aiticket setreplycommand <reply|freply|...>```
+```?aiticket setreplycommand <freply|areply|reply|...>```
 ```?aiticket setescalateonerror <true/false>```
 ```?aiticket test [optional prompt]```
 ```?aiticket addkeyword <phrase>```
